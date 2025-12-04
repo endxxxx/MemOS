@@ -30,11 +30,11 @@ from memos.mem_os.utils.reference_utils import (
     prepare_reference_data,
     process_streaming_references_complete,
 )
-from memos.mem_scheduler.schemas.general_schemas import (
-    ANSWER_LABEL,
-    QUERY_LABEL,
-)
 from memos.mem_scheduler.schemas.message_schemas import ScheduleMessageItem
+from memos.mem_scheduler.schemas.task_schemas import (
+    ANSWER_TASK_LABEL,
+    QUERY_TASK_LABEL,
+)
 from memos.templates.mos_prompts import (
     FURTHER_SUGGESTION_PROMPT,
     get_memos_prompt,
@@ -142,7 +142,9 @@ class ChatHandler(BaseHandler):
 
             # Step 2: Build system prompt
             system_prompt = self._build_system_prompt(
-                filtered_memories, search_response.data["pref_string"], chat_req.system_prompt
+                filtered_memories,
+                search_response.data.get("pref_string", ""),
+                chat_req.system_prompt,
             )
 
             # Prepare message history
@@ -242,7 +244,7 @@ class ChatHandler(BaseHandler):
                         user_id=chat_req.user_id,
                         mem_cube_id=scheduler_cube_id,
                         query=chat_req.query,
-                        label=QUERY_LABEL,
+                        label=QUERY_TASK_LABEL,
                     )
                     # Extract memories from search results
                     memories_list = []
@@ -257,7 +259,7 @@ class ChatHandler(BaseHandler):
                     # Step 2: Build system prompt with memories
                     system_prompt = self._build_system_prompt(
                         filtered_memories,
-                        search_response.data["pref_string"],
+                        search_response.data.get("pref_string", ""),
                         chat_req.system_prompt,
                     )
 
@@ -398,6 +400,7 @@ class ChatHandler(BaseHandler):
                         include_preference=chat_req.include_preference,
                         pref_top_k=chat_req.pref_top_k,
                         filter=chat_req.filter,
+                        playground_search_goal_parser=True,
                     )
 
                     search_response = self.search_handler.handle_search_memories(search_req)
@@ -420,7 +423,7 @@ class ChatHandler(BaseHandler):
                         user_id=chat_req.user_id,
                         mem_cube_id=scheduler_cube_id,
                         query=chat_req.query,
-                        label=QUERY_LABEL,
+                        label=QUERY_TASK_LABEL,
                     )
                     # Extract memories from search results
                     memories_list = []
@@ -449,7 +452,7 @@ class ChatHandler(BaseHandler):
 
                     # Step 2: Build system prompt with memories
                     system_prompt = self._build_enhance_system_prompt(
-                        filtered_memories, search_response.data["pref_string"]
+                        filtered_memories, search_response.data.get("pref_string", "")
                     )
 
                     # Prepare messages
@@ -1031,7 +1034,7 @@ class ChatHandler(BaseHandler):
 
             # Send answer to scheduler
             self._send_message_to_scheduler(
-                user_id=user_id, mem_cube_id=cube_id, query=clean_response, label=ANSWER_LABEL
+                user_id=user_id, mem_cube_id=cube_id, query=clean_response, label=ANSWER_TASK_LABEL
             )
 
             self.logger.info(f"Post-chat processing completed for user {user_id}")

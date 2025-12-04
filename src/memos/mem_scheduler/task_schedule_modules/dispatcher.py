@@ -4,10 +4,15 @@ import time
 
 from collections import defaultdict
 from collections.abc import Callable
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Any
 
-from memos.context.context import ContextThreadPoolExecutor
+from memos.context.context import (
+    ContextThreadPoolExecutor,
+    RequestContext,
+    generate_trace_id,
+    set_request_context,
+)
 from memos.log import get_logger
 from memos.mem_scheduler.general_modules.base import BaseSchedulerModule
 from memos.mem_scheduler.general_modules.task_threads import ThreadManager
@@ -15,10 +20,12 @@ from memos.mem_scheduler.schemas.general_schemas import (
     DEFAULT_STOP_WAIT,
 )
 from memos.mem_scheduler.schemas.message_schemas import ScheduleMessageItem
-from memos.mem_scheduler.schemas.task_schemas import RunningTaskItem
+from memos.mem_scheduler.schemas.task_schemas import RunningTaskItem, TaskPriorityLevel
+from memos.mem_scheduler.task_schedule_modules.orchestrator import SchedulerOrchestrator
 from memos.mem_scheduler.task_schedule_modules.redis_queue import SchedulerRedisQueue
 from memos.mem_scheduler.task_schedule_modules.task_queue import ScheduleTaskQueue
 from memos.mem_scheduler.utils.misc_utils import group_messages_by_user_and_mem_cube
+from memos.mem_scheduler.utils.monitor_event_utils import emit_monitor_event, to_iso
 from memos.mem_scheduler.utils.status_tracker import TaskStatusTracker
 
 
@@ -47,6 +54,7 @@ class SchedulerDispatcher(BaseSchedulerModule):
         status_tracker: TaskStatusTracker | None = None,
         metrics: Any | None = None,
         submit_web_logs: Callable | None = None,  # ADDED
+        orchestrator: SchedulerOrchestrator | None = None,
     ):
         super().__init__()
         self.config = config
@@ -60,7 +68,7 @@ class SchedulerDispatcher(BaseSchedulerModule):
             if hasattr(memos_message_queue, "memos_message_queue")
             else memos_message_queue
         )
-
+        self.orchestrator = SchedulerOrchestrator() if orchestrator is None else orchestrator
         # Get multi-task timeout from config
         self.multi_task_running_timeout = (
             self.config.get("multi_task_running_timeout") if self.config else None
@@ -73,6 +81,7 @@ class SchedulerDispatcher(BaseSchedulerModule):
             self.dispatcher_executor = ContextThreadPoolExecutor(
                 max_workers=self.max_workers, thread_name_prefix=self.thread_name_prefix
             )
+            logger.info(f"Max works of dispatcher is set to {self.max_workers}")
         else:
             self.dispatcher_executor = None
         logger.info(f"enable_parallel_dispatch is set to {self.enable_parallel_dispatch}")
@@ -121,15 +130,26 @@ class SchedulerDispatcher(BaseSchedulerModule):
 
         def wrapped_handler(messages: list[ScheduleMessageItem]):
             start_time = time.time()
+            start_iso = datetime.fromtimestamp(start_time, tz=timezone.utc).isoformat()
             if self.status_tracker:
                 self.status_tracker.task_started(
                     task_id=task_item.item_id, user_id=task_item.user_id
                 )
             try:
+                first_msg = messages[0]
+                trace_id = getattr(first_msg, "trace_id", None) or generate_trace_id()
+                # Propagate trace_id and user info to logging context for this handler execution
+                ctx = RequestContext(
+                    trace_id=trace_id,
+                    user_name=getattr(first_msg, "user_name", None),
+                    user_type=None,
+                )
+                set_request_context(ctx)
+
                 # --- mark start: record queuing time(now - enqueue_ts)---
                 now = time.time()
-                m = messages[0]  # All messages in this batch have same user and type
-                enq_ts = getattr(m, "timestamp", None)
+                m = first_msg  # All messages in this batch have same user and type
+                enq_ts = getattr(first_msg, "timestamp", None)
 
                 # Path 1: epoch seconds (preferred)
                 if isinstance(enq_ts, int | float):
@@ -149,17 +169,51 @@ class SchedulerDispatcher(BaseSchedulerModule):
                 wait_sec = max(0.0, now - enq_epoch)
                 self.metrics.observe_task_wait_duration(wait_sec, m.user_id, m.label)
 
+                dequeue_ts = getattr(first_msg, "_dequeue_ts", None)
+                start_delay_ms = None
+                if isinstance(dequeue_ts, int | float):
+                    start_delay_ms = max(0.0, start_time - dequeue_ts) * 1000
+
+                emit_monitor_event(
+                    "start",
+                    first_msg,
+                    {
+                        "start_ts": start_iso,
+                        "start_delay_ms": start_delay_ms,
+                        "enqueue_ts": to_iso(enq_ts),
+                        "dequeue_ts": to_iso(
+                            datetime.fromtimestamp(dequeue_ts, tz=timezone.utc)
+                            if isinstance(dequeue_ts, int | float)
+                            else None
+                        ),
+                    },
+                )
+
                 # Execute the original handler
                 result = handler(messages)
 
                 # --- mark done ---
-                duration = time.time() - start_time
+                finish_time = time.time()
+                duration = finish_time - start_time
                 self.metrics.observe_task_duration(duration, m.user_id, m.label)
                 if self.status_tracker:
                     self.status_tracker.task_completed(
                         task_id=task_item.item_id, user_id=task_item.user_id
                     )
                 self.metrics.task_completed(user_id=m.user_id, task_type=m.label)
+
+                emit_monitor_event(
+                    "finish",
+                    first_msg,
+                    {
+                        "status": "ok",
+                        "start_ts": start_iso,
+                        "finish_ts": datetime.fromtimestamp(
+                            finish_time, tz=timezone.utc
+                        ).isoformat(),
+                        "exec_duration_ms": duration * 1000,
+                    },
+                )
                 # Redis ack is handled in finally to cover failure cases
 
                 # Mark task as completed and remove from tracking
@@ -172,11 +226,26 @@ class SchedulerDispatcher(BaseSchedulerModule):
 
             except Exception as e:
                 m = messages[0]
+                finish_time = time.time()
                 self.metrics.task_failed(m.user_id, m.label, type(e).__name__)
                 if self.status_tracker:
                     self.status_tracker.task_failed(
                         task_id=task_item.item_id, user_id=task_item.user_id, error_message=str(e)
                     )
+                emit_monitor_event(
+                    "finish",
+                    m,
+                    {
+                        "status": "fail",
+                        "start_ts": start_iso,
+                        "finish_ts": datetime.fromtimestamp(
+                            finish_time, tz=timezone.utc
+                        ).isoformat(),
+                        "exec_duration_ms": (finish_time - start_time) * 1000,
+                        "error_type": type(e).__name__,
+                        "error_msg": str(e),
+                    },
+                )
                 # Mark task as failed and remove from tracking
                 with self._task_lock:
                     if task_item.item_id in self._running_tasks:
@@ -397,9 +466,19 @@ class SchedulerDispatcher(BaseSchedulerModule):
                     # Create wrapped handler for task tracking
                     wrapped_handler = self._create_task_wrapper(handler, task_item)
 
+                    task_priority = self.orchestrator.get_task_priority(task_label=label)
+
                     # dispatch to different handler
                     logger.debug(f"Task started: {task_item.get_execution_info()}")
-                    if self.enable_parallel_dispatch and self.dispatcher_executor is not None:
+
+                    # If priority is LEVEL_1, force synchronous execution regardless of thread pool availability
+                    use_thread_pool = (
+                        self.enable_parallel_dispatch
+                        and self.dispatcher_executor is not None
+                        and task_priority != TaskPriorityLevel.LEVEL_1
+                    )
+
+                    if use_thread_pool:
                         # Submit and track the future
                         future = self.dispatcher_executor.submit(wrapped_handler, msgs)
                         with self._task_lock:
@@ -410,6 +489,9 @@ class SchedulerDispatcher(BaseSchedulerModule):
                         )
                     else:
                         # For synchronous execution, the wrapper will run and remove the task upon completion
+                        logger.info(
+                            f"Execute {len(msgs)} message(s) synchronously for {label} (priority: {task_priority}) for user {user_id} and mem_cube {mem_cube_id}."
+                        )
                         wrapped_handler(msgs)
 
     def join(self, timeout: float | None = None) -> bool:

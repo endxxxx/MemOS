@@ -5,12 +5,15 @@ This module provides a Redis-based queue implementation that can replace
 the local memos_message_queue functionality in BaseScheduler.
 """
 
+from memos.context.context import get_current_trace_id
 from memos.log import get_logger
 from memos.mem_scheduler.schemas.message_schemas import ScheduleMessageItem
 from memos.mem_scheduler.task_schedule_modules.local_queue import SchedulerLocalQueue
+from memos.mem_scheduler.task_schedule_modules.orchestrator import SchedulerOrchestrator
 from memos.mem_scheduler.task_schedule_modules.redis_queue import SchedulerRedisQueue
 from memos.mem_scheduler.utils.db_utils import get_utc_now
 from memos.mem_scheduler.utils.misc_utils import group_messages_by_user_and_mem_cube
+from memos.mem_scheduler.utils.monitor_event_utils import emit_monitor_event, to_iso
 
 
 logger = get_logger(__name__)
@@ -22,12 +25,21 @@ class ScheduleTaskQueue:
         use_redis_queue: bool,
         maxsize: int,
         disabled_handlers: list | None = None,
+        orchestrator: SchedulerOrchestrator | None = None,
     ):
         self.use_redis_queue = use_redis_queue
         self.maxsize = maxsize
+        self.orchestrator = SchedulerOrchestrator() if orchestrator is None else orchestrator
 
         if self.use_redis_queue:
-            self.memos_message_queue = SchedulerRedisQueue(maxsize=self.maxsize)
+            if maxsize is None or not isinstance(maxsize, int) or maxsize <= 0:
+                maxsize = None
+            self.memos_message_queue = SchedulerRedisQueue(
+                max_len=maxsize,
+                consumer_group="scheduler_group",
+                consumer_name="scheduler_consumer",
+                orchestrator=self.orchestrator,
+            )
         else:
             self.memos_message_queue = SchedulerLocalQueue(maxsize=self.maxsize)
 
@@ -63,7 +75,12 @@ class ScheduleTaskQueue:
         if isinstance(messages, ScheduleMessageItem):
             messages = [messages]
 
+        current_trace_id = get_current_trace_id()
+
         for msg in messages:
+            if current_trace_id:
+                # Prefer current request trace_id so logs can be correlated
+                msg.trace_id = current_trace_id
             msg.stream_key = self.memos_message_queue.get_stream_key(
                 user_id=msg.user_id, mem_cube_id=msg.mem_cube_id, task_label=msg.label
             )
@@ -71,6 +88,8 @@ class ScheduleTaskQueue:
         if len(messages) < 1:
             logger.error("Submit empty")
         elif len(messages) == 1:
+            enqueue_ts = to_iso(getattr(messages[0], "timestamp", None))
+            emit_monitor_event("enqueue", messages[0], {"enqueue_ts": enqueue_ts})
             self.memos_message_queue.put(messages[0])
         else:
             user_cube_groups = group_messages_by_user_and_mem_cube(messages)
@@ -93,6 +112,8 @@ class ScheduleTaskQueue:
                             )
                             continue
 
+                        enqueue_ts = to_iso(getattr(message, "timestamp", None))
+                        emit_monitor_event("enqueue", message, {"enqueue_ts": enqueue_ts})
                         self.memos_message_queue.put(message)
                         logger.info(
                             f"Submitted message to local queue: {message.label} - {message.content}"

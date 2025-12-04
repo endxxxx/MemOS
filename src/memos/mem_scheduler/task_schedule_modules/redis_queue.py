@@ -16,7 +16,10 @@ from uuid import uuid4
 
 from memos.context.context import ContextThread
 from memos.log import get_logger
-from memos.mem_scheduler.schemas.general_schemas import DEFAULT_STREAM_KEY_PREFIX
+from memos.mem_scheduler.schemas.general_schemas import (
+    DEFAULT_PENDING_CLAIM_MIN_IDLE_MS,
+    DEFAULT_STREAM_KEY_PREFIX,
+)
 from memos.mem_scheduler.schemas.message_schemas import ScheduleMessageItem
 from memos.mem_scheduler.task_schedule_modules.orchestrator import SchedulerOrchestrator
 from memos.mem_scheduler.webservice_modules.redis_service import RedisSchedulerModule
@@ -43,10 +46,10 @@ class SchedulerRedisQueue(RedisSchedulerModule):
             "MEMSCHEDULER_REDIS_STREAM_KEY_PREFIX",
             DEFAULT_STREAM_KEY_PREFIX,
         ),
+        orchestrator: SchedulerOrchestrator | None = None,
         consumer_group: str = "scheduler_group",
         consumer_name: str | None = "scheduler_consumer",
-        max_len: int = 10000,
-        maxsize: int = 0,  # For Queue compatibility
+        max_len: int | None = None,
         auto_delete_acked: bool = True,  # Whether to automatically delete acknowledged messages
     ):
         """
@@ -61,17 +64,11 @@ class SchedulerRedisQueue(RedisSchedulerModule):
             auto_delete_acked: Whether to automatically delete acknowledged messages from stream
         """
         super().__init__()
-
-        # If maxsize <= 0, set to None (unlimited queue size)
-        if maxsize <= 0:
-            maxsize = 0
-
         # Stream configuration
         self.stream_key_prefix = stream_key_prefix
         self.consumer_group = consumer_group
         self.consumer_name = consumer_name or f"consumer_{uuid4().hex[:8]}"
         self.max_len = max_len
-        self.maxsize = maxsize  # For Queue compatibility
         self.auto_delete_acked = auto_delete_acked  # Whether to delete acknowledged messages
 
         # Consumer state
@@ -102,7 +99,8 @@ class SchedulerRedisQueue(RedisSchedulerModule):
 
         # Task Orchestrator
         self.message_pack_cache = deque()
-        self.orchestrator = SchedulerOrchestrator(queue=self)
+
+        self.orchestrator = SchedulerOrchestrator() if orchestrator is None else orchestrator
 
     def get_stream_key(self, user_id: str, mem_cube_id: str, task_label: str) -> str:
         stream_key = f"{self.stream_key_prefix}:{user_id}:{mem_cube_id}:{task_label}"
@@ -188,64 +186,10 @@ class SchedulerRedisQueue(RedisSchedulerModule):
         except Exception as e:
             # Check if it's a "consumer group already exists" error
             error_msg = str(e).lower()
-            if "busygroup" in error_msg or "already exists" in error_msg:
-                logger.info(
-                    f"Consumer group '{self.consumer_group}' already exists for stream '{stream_key}'"
-                )
-            else:
+            if not ("busygroup" in error_msg or "already exists" in error_msg):
                 logger.error(f"Error creating consumer group: {e}", exc_info=True)
 
-    def _get_pending_lock_key(self, stream_key: str) -> str:
-        """Compose a Redis lock key for pending reads on a specific stream.
-
-        Lock key includes stream prefix and consumer group to avoid collisions
-        across different deployments/groups.
-        """
-        # Use a stable lock namespace; include group to isolate multiple schedulers
-        return f"{self.stream_key_prefix}:lock:pending:{self.consumer_group}:{stream_key}"
-
-    def _acquire_pending_lock(self, stream_key: str, ttl_ms: int = 2000) -> str | None:
-        """Try to acquire a short-lived lock before reading pending messages.
-
-        Returns a unique token if the lock is acquired, otherwise None.
-        """
-        if not self._redis_conn:
-            return None
-        token = uuid4().hex
-        try:
-            ok = self._redis_conn.set(
-                self._get_pending_lock_key(stream_key), token, nx=True, px=ttl_ms
-            )
-            if ok:
-                logger.debug(
-                    f"Acquired pending-read lock for stream '{stream_key}' (ttl_ms={ttl_ms})"
-                )
-                return token
-            else:
-                logger.debug(f"Skip pending-read: lock not acquired for stream '{stream_key}'")
-                return None
-        except Exception as e:
-            logger.warning(f"Failed to acquire pending-read lock for '{stream_key}': {e}")
-            return None
-
-    def _release_pending_lock(self, stream_key: str, token: str) -> None:
-        """Release the pending-read lock only if owned (token matches)."""
-        if not self._redis_conn or not token:
-            return
-        lock_key = self._get_pending_lock_key(stream_key)
-        # Compare-and-delete via Lua to ensure we only release our own lock
-        lua = """
-        if redis.call('get', KEYS[1]) == ARGV[1] then
-            return redis.call('del', KEYS[1])
-        else
-            return 0
-        end
-        """
-        try:
-            self._redis_conn.eval(lua, 1, lock_key, token)
-            logger.debug(f"Released pending-read lock for stream '{stream_key}'")
-        except Exception as e:
-            logger.debug(f"Release lock failed for '{stream_key}': {e}")
+    # Pending lock methods removed as they are unnecessary with idle-threshold claiming
 
     def put(
         self, message: ScheduleMessageItem, block: bool = True, timeout: float | None = None
@@ -390,46 +334,44 @@ class SchedulerRedisQueue(RedisSchedulerModule):
                 need_pending_count = need_pending if need_pending > 0 else 0
 
             if need_pending_count:
-                # Acquire a short-lived lock to avoid multiple processes reading the same pending
-                # messages concurrently when sharing the same consumer_name.
-                ttl_ms = 2000
-                token = self._acquire_pending_lock(stream_key=stream_key, ttl_ms=ttl_ms)
-                if token:
-                    try:
+                # Claim only pending messages whose idle time exceeds configured threshold
+                try:
+                    # Ensure group exists before claiming
+                    self._ensure_consumer_group(stream_key=stream_key)
+                    # XAUTOCLAIM returns (next_start_id, [(id, fields), ...])
+                    next_id, claimed = self._redis_conn.xautoclaim(
+                        name=stream_key,
+                        groupname=self.consumer_group,
+                        consumername=self.consumer_name,
+                        min_idle_time=DEFAULT_PENDING_CLAIM_MIN_IDLE_MS,
+                        start_id="0-0",
+                        count=need_pending_count,
+                        justid=False,
+                    )
+                    pending_messages = [(stream_key, claimed)] if claimed else []
+                except Exception as read_err:
+                    # Handle missing group/stream by creating and retrying once
+                    err_msg = str(read_err).lower()
+                    if "nogroup" in err_msg or "no such key" in err_msg:
+                        logger.warning(
+                            f"Consumer group or stream missing for '{stream_key}/{self.consumer_group}'. Attempting to create and retry (xautoclaim)."
+                        )
                         try:
-                            pending_messages = self._redis_conn.xreadgroup(
-                                self.consumer_group,
-                                self.consumer_name,
-                                {stream_key: "0"},  # read only this consumer's pending
+                            self._ensure_consumer_group(stream_key=stream_key)
+                            next_id, claimed = self._redis_conn.xautoclaim(
+                                name=stream_key,
+                                groupname=self.consumer_group,
+                                consumername=self.consumer_name,
+                                min_idle_time=DEFAULT_PENDING_CLAIM_MIN_IDLE_MS,
+                                start_id="0-0",
                                 count=need_pending_count,
-                                block=None,  # do not block when checking pending
+                                justid=False,
                             )
-                        except Exception as read_err:
-                            # Handle missing group/stream by creating and retrying once
-                            err_msg = str(read_err).lower()
-                            if "nogroup" in err_msg or "no such key" in err_msg:
-                                logger.warning(
-                                    f"Consumer group or stream missing for '{stream_key}/{self.consumer_group}'. Attempting to create and retry (pending)."
-                                )
-                                self._ensure_consumer_group(stream_key=stream_key)
-                                try:
-                                    pending_messages = self._redis_conn.xreadgroup(
-                                        self.consumer_group,
-                                        self.consumer_name,
-                                        {stream_key: "0"},
-                                        count=need_pending_count,
-                                        block=None,
-                                    )
-                                except Exception:
-                                    pending_messages = []
-                            else:
-                                pending_messages = []
-                    finally:
-                        # Always release the lock
-                        self._release_pending_lock(stream_key=stream_key, token=token)
-                else:
-                    # If lock not acquired, skip pending read in this round
-                    pending_messages = []
+                            pending_messages = [(stream_key, claimed)] if claimed else []
+                        except Exception:
+                            pending_messages = []
+                    else:
+                        pending_messages = []
 
             # Combine: new first, then pending
             messages = []
@@ -486,10 +428,8 @@ class SchedulerRedisQueue(RedisSchedulerModule):
         total_size = 0
         try:
             qsize_stats = {}
-            # Scan for all stream keys matching the prefix
-            redis_pattern = f"{self.stream_key_prefix}:*"
-            for stream_key in self._redis_conn.scan_iter(redis_pattern):
-                # Get the length of each stream and add to total
+            # Use filtered stream keys to avoid WRONGTYPE on non-stream keys
+            for stream_key in self.get_stream_keys():
                 stream_qsize = self._redis_conn.xlen(stream_key)
                 qsize_stats[stream_key] = stream_qsize
                 total_size += stream_qsize
@@ -504,8 +444,12 @@ class SchedulerRedisQueue(RedisSchedulerModule):
         """
         List all Redis stream keys that match this queue's prefix.
 
+        Only returns actual Redis Stream keys, excluding auxiliary keys
+        (e.g., any lock or string/hash keys). This avoids WRONGTYPE errors
+        when issuing stream commands on non-stream keys.
+
         Returns:
-            A list of stream keys like `"{prefix}:{user_id}:{mem_cube_id}"`.
+            A list of stream keys like `"{prefix}:{user_id}:{mem_cube_id}:{task_label}"`.
         """
         if not self._redis_conn:
             return []
@@ -514,7 +458,8 @@ class SchedulerRedisQueue(RedisSchedulerModule):
             stream_key_prefix = self.stream_key_prefix
         # First, get all keys that might match (using Redis pattern matching)
         redis_pattern = f"{stream_key_prefix}:*"
-        raw_keys = self._redis_conn.scan_iter(match=redis_pattern)
+        raw_keys_iter = self._redis_conn.scan_iter(match=redis_pattern)
+        raw_keys = list(raw_keys_iter)
 
         # Second, filter using Python regex to ensure exact prefix match
         # Escape special regex characters in the prefix, then add :.*
@@ -522,7 +467,6 @@ class SchedulerRedisQueue(RedisSchedulerModule):
         regex_pattern = f"^{escaped_prefix}:"
         stream_keys = [key for key in raw_keys if re.match(regex_pattern, key)]
 
-        logger.debug(f"get stream_keys from redis: {stream_keys}")
         return stream_keys
 
     def size(self) -> int:
@@ -545,18 +489,9 @@ class SchedulerRedisQueue(RedisSchedulerModule):
         return self.size() == 0
 
     def full(self) -> bool:
-        """
-        Check if the Redis queue is full (Queue-compatible interface).
-
-        For Redis streams, we consider the queue full if it exceeds maxsize.
-        If maxsize is 0 or None, the queue is never considered full.
-
-        Returns:
-            True if the queue is full, False otherwise
-        """
-        if self.maxsize <= 0:
+        if self.max_len is None:
             return False
-        return self.size() >= self.maxsize
+        return self.size() >= self.max_len
 
     def join(self) -> None:
         """
