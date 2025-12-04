@@ -55,7 +55,7 @@ class Mem0Client:
         self.client = MemoryClient(api_key=os.getenv("MEM0_API_KEY"))
         self.enable_graph = enable_graph
 
-    def add(self, messages, user_id, timestamp, batch_size=2):
+    def add(self, messages, user_id, timestamp, batch_size=2, infer=False):
         max_retries = 5
         for i in range(0, len(messages), batch_size):
             batch_messages = messages[i : i + batch_size]
@@ -64,15 +64,16 @@ class Mem0Client:
                     if self.enable_graph:
                         self.client.add(
                             messages=batch_messages,
-                            timestamp=timestamp,
                             user_id=user_id,
+                            timestamp=timestamp,
                             enable_graph=True,
                         )
                     else:
                         self.client.add(
                             messages=batch_messages,
-                            timestamp=timestamp,
                             user_id=user_id,
+                            timestamp=timestamp,
+                            infer=infer,
                         )
                     break
                 except Exception as e:
@@ -147,33 +148,76 @@ class MemosApiClient:
         self.memos_url = os.getenv("MEMOS_URL")
         self.headers = {"Content-Type": "application/json", "Authorization": os.getenv("MEMOS_KEY")}
 
+    def get_user(self, user_id: str):
+        url = f"{self.memos_url}/product/users/{user_id}"
+        response = requests.request("GET", url, headers=self.headers)
+        if response.status_code == 200:
+            return json.loads(response.text).get("data")
+        return None
+
+    def register_user(
+        self, user_id: str, user_name: str | None = None, mem_cube_id: str | None = None
+    ):
+        if self.get_user(user_id):
+            return {"user_id": user_id, "mem_cube_id": mem_cube_id or user_id}
+        url = f"{self.memos_url}/product/users/register"
+        payload = json.dumps(
+            {
+                "user_id": user_id,
+                "user_name": user_name or user_id,
+                "mem_cube_id": mem_cube_id or user_id,
+            }
+        )
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                response = requests.request("POST", url, data=payload, headers=self.headers)
+                assert response.status_code == 200, response.text
+                resp_msg = json.loads(response.text).get("message", "")
+                assert resp_msg == "User registered successfully", response.text
+                return json.loads(response.text)["data"]
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2**attempt)
+                else:
+                    raise e
+
     def add(self, messages, user_id, conv_id, batch_size: int = 9999):
         """
         messages = [{"role": "assistant", "content": data, "chat_time": date_str}]
         """
         url = f"{self.memos_url}/product/add"
         added_memories = []
-        for i in range(0, len(messages), batch_size):
-            batch_messages = messages[i : i + batch_size]
-            payload = json.dumps(
-                {
-                    "messages": batch_messages,
-                    "user_id": user_id,
-                    "mem_cube_id": user_id,
-                    "conversation_id": conv_id,
-                }
-            )
-            response = requests.request("POST", url, data=payload, headers=self.headers)
-            assert response.status_code == 200, response.text
-            assert json.loads(response.text)["message"] == "Memory added successfully", (
-                response.text
-            )
-            added_memories += json.loads(response.text)["data"]
+        payload = json.dumps(
+            {
+                "messages": messages,
+                "user_id": user_id,
+                "mem_cube_id": user_id,
+                "conversation_id": conv_id,
+            }
+        )
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                response = requests.request("POST", url, data=payload, headers=self.headers)
+                assert response.status_code == 200, response.text
+                resp_msg = json.loads(response.text).get("message", "")
+                assert resp_msg in (
+                    "Memory created successfully",
+                    "Memory added successfully",
+                ), response.text
+                break
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2**attempt)
+                else:
+                    raise e
         return added_memories
 
     def search(self, query, user_id, top_k):
         """Search memories."""
         url = f"{self.memos_url}/product/search"
+        print(f"search_mode: {os.getenv('SEARCH_MODE', 'fast')}")
         payload = json.dumps(
             {
                 "query": query,
@@ -187,12 +231,20 @@ class MemosApiClient:
             },
             ensure_ascii=False,
         )
-        response = requests.request("POST", url, data=payload, headers=self.headers)
-        assert response.status_code == 200, response.text
-        assert json.loads(response.text)["message"] == "Search completed successfully", (
-            response.text
-        )
-        return json.loads(response.text)["data"]
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                response = requests.request("POST", url, data=payload, headers=self.headers)
+                assert response.status_code == 200, response.text
+                assert json.loads(response.text)["message"] == "Search completed successfully", (
+                    response.text
+                )
+                return json.loads(response.text)["data"]
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2**attempt)
+                else:
+                    raise e
 
 
 class MemosApiOnlineClient:
@@ -280,14 +332,16 @@ class SupermemoryClient:
 
         self.client = Supermemory(api_key=os.getenv("SUPERMEMORY_API_KEY"))
 
-    def add(self, messages, user_id):
-        content = "\n".join(
-            [f"{msg['chat_time']} {msg['role']}: {msg['content']}" for msg in messages]
-        )
+    def add(self, messages, user_id, conv_id=None):
+        content = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages])
         max_retries = 5
         for attempt in range(max_retries):
             try:
-                self.client.memories.add(content=content, container_tag=user_id)
+                self.client.memories.add(
+                    content=content,
+                    container_tag=user_id,
+                    metadata={"raw": "\n".join([msg["content"] for msg in messages])},
+                )
                 break
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -307,8 +361,7 @@ class SupermemoryClient:
                     rewrite_query=True,
                     limit=top_k,
                 )
-                context = "\n\n".join([r.memory for r in results.results])
-                return context
+                return results
             except Exception as e:
                 if attempt < max_retries - 1:
                     time.sleep(2**attempt)

@@ -30,6 +30,47 @@ def extract_content(msg: dict[str, Any] | str) -> str:
     return str(msg)
 
 
+def extract_texts_and_sp_from_sources(
+    sources: list[SourceMessage | dict | str],
+) -> tuple[list[str], list[tuple[str, int]]]:
+    texts: list[str] = []
+    sps: list[tuple[str, int]] = []
+    for src in sources or []:
+        raw = extract_content(src)
+        content = raw
+        try:
+            import json as _json
+
+            obj = _json.loads(raw) if isinstance(raw, str) else None
+            if isinstance(obj, str):
+                try:
+                    obj2 = _json.loads(obj)
+                    obj = obj2
+                except Exception:
+                    pass
+            if isinstance(obj, dict):
+                content = obj.get("content", raw)
+        except Exception:
+            pass
+
+        idx = 0
+        if isinstance(content, str):
+            m = re.search(r"\s\[#(\d+)\]\s*$", content)
+            if m:
+                try:
+                    idx = int(m.group(1))
+                except Exception:
+                    idx = 0
+                content = re.sub(r"\s\[#(\d+)\]\s*$", "", content).rstrip()
+
+        texts.append(content)
+        if isinstance(content, str) and ":" in content:
+            title = content.split(":", 1)[0].strip()
+            if title:
+                sps.append((title, idx))
+    return texts, sps
+
+
 class DialoguePair(BaseModel):
     """Represents a single dialogue pair extracted from sources."""
 
