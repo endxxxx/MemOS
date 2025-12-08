@@ -16,6 +16,7 @@ from memos.context.context import (
     ContextThread,
     RequestContext,
     get_current_context,
+    get_current_trace_id,
     set_request_context,
 )
 from memos.llms.base import BaseLLM
@@ -139,12 +140,7 @@ class BaseScheduler(RabbitMQSchedulerModule, RedisSchedulerModule, SchedulerLogg
             "max_internal_message_queue_size", DEFAULT_MAX_INTERNAL_MESSAGE_QUEUE_SIZE
         )
         self.orchestrator = SchedulerOrchestrator()
-        self.memos_message_queue = ScheduleTaskQueue(
-            use_redis_queue=self.use_redis_queue,
-            maxsize=self.max_internal_message_queue_size,
-            disabled_handlers=self.disabled_handlers,
-            orchestrator=self.orchestrator,
-        )
+
         self.searcher: Searcher | None = None
         self.retriever: SchedulerRetriever | None = None
         self.db_engine: Engine | None = None
@@ -154,6 +150,13 @@ class BaseScheduler(RabbitMQSchedulerModule, RedisSchedulerModule, SchedulerLogg
         self.status_tracker: TaskStatusTracker | None = None
         self.metrics = metrics
         self._monitor_thread = None
+        self.memos_message_queue = ScheduleTaskQueue(
+            use_redis_queue=self.use_redis_queue,
+            maxsize=self.max_internal_message_queue_size,
+            disabled_handlers=self.disabled_handlers,
+            orchestrator=self.orchestrator,
+            status_tracker=self.status_tracker,
+        )
         self.dispatcher = SchedulerDispatcher(
             config=self.config,
             memos_message_queue=self.memos_message_queue,
@@ -227,6 +230,8 @@ class BaseScheduler(RabbitMQSchedulerModule, RedisSchedulerModule, SchedulerLogg
                 self.status_tracker = TaskStatusTracker(redis_client)
                 if self.dispatcher:
                     self.dispatcher.status_tracker = self.status_tracker
+                if self.memos_message_queue:
+                    self.memos_message_queue.status_tracker = self.status_tracker
             # initialize submodules
             self.chat_llm = chat_llm
             self.process_llm = process_llm
@@ -664,10 +669,16 @@ class BaseScheduler(RabbitMQSchedulerModule, RedisSchedulerModule, SchedulerLogg
         if not messages:
             return
 
+        current_trace_id = get_current_trace_id()
+
         immediate_msgs: list[ScheduleMessageItem] = []
         queued_msgs: list[ScheduleMessageItem] = []
 
         for msg in messages:
+            # propagate request trace_id when available so monitor logs align with request logs
+            if current_trace_id:
+                msg.trace_id = current_trace_id
+
             # basic metrics and status tracking
             with suppress(Exception):
                 self.metrics.task_enqueued(user_id=msg.user_id, task_type=msg.label)

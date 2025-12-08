@@ -2,6 +2,7 @@ import json
 import random
 import textwrap
 
+from contextlib import suppress
 from datetime import datetime
 from typing import Any, Literal
 
@@ -151,7 +152,7 @@ class PolarDBGraphDB(BaseGraphDB):
         # Create connection pool
         self.connection_pool = psycopg2.pool.ThreadedConnectionPool(
             minconn=5,
-            maxconn=100,
+            maxconn=2000,
             host=host,
             port=port,
             user=user,
@@ -211,15 +212,19 @@ class PolarDBGraphDB(BaseGraphDB):
 
                 # Check if connection is closed
                 if conn.closed != 0:
-                    # Connection is closed, close it explicitly and try again
+                    # Connection is closed, return it to pool with close flag and try again
                     try:
-                        conn.close()
+                        self.connection_pool.putconn(conn, close=True)
                     except Exception as e:
-                        logger.warning(f"Failed to close connection: {e}")
+                        logger.warning(f"Failed to return closed connection to pool: {e}")
+                        with suppress(Exception):
+                            conn.close()
+
+                    conn = None
                     if attempt < max_retries - 1:
                         continue
                     else:
-                        raise RuntimeError("Pool returned a closed connection")
+                        raise RuntimeError("Pool returned a closed connection after all retries")
 
                 # Set autocommit for PolarDB compatibility
                 conn.autocommit = True
@@ -231,20 +236,18 @@ class PolarDBGraphDB(BaseGraphDB):
                     cursor.fetchone()
                     cursor.close()
                 except Exception as health_check_error:
-                    # Connection is not usable, close it and try again
+                    # Connection is not usable, return it to pool with close flag and try again
                     logger.warning(
-                        f"Connection health check failed: {health_check_error}, closing connection and retrying..."
+                        f"Connection health check failed: {health_check_error}, returning connection to pool and retrying..."
                     )
                     try:
-                        conn.close()
-                    except Exception as close_error:
-                        logger.warning(f"Failed to close unhealthy connection: {close_error}")
-
-                    # Return connection to pool if it's still valid
-                    try:
                         self.connection_pool.putconn(conn, close=True)
-                    except Exception as close_error:
-                        logger.warning(f"Failed to connection_pool.putconn: {close_error}")
+                    except Exception as putconn_error:
+                        logger.warning(
+                            f"Failed to return unhealthy connection to pool: {putconn_error}"
+                        )
+                        with suppress(Exception):
+                            conn.close()
 
                     conn = None
                     if attempt < max_retries - 1:
@@ -257,14 +260,20 @@ class PolarDBGraphDB(BaseGraphDB):
                 # Connection is healthy, return it
                 return conn
             except Exception as e:
-                # If we have a connection that failed, try to return it to pool
+                # Only try to return connection if we actually got one
+                # If getconn() failed (e.g., pool exhausted), conn will be None
                 if conn is not None:
                     try:
-                        self.connection_pool.putconn(conn, close=True)
+                        # If it's a PoolError or similar, close the connection instead of returning
+                        if "pool" in str(e).lower() or "exhausted" in str(e).lower():
+                            with suppress(Exception):
+                                conn.close()
+                        else:
+                            self.connection_pool.putconn(conn, close=True)
                     except Exception as putconn_error:
-                        logger.warning(
-                            f"Failed to connection_pool.putconn to pool: {putconn_error}"
-                        )
+                        logger.warning(f"Failed to handle connection after error: {putconn_error}")
+                        with suppress(Exception):
+                            conn.close()
 
                 if attempt >= max_retries - 1:
                     raise RuntimeError(f"Failed to get a valid connection from pool: {e}") from e
@@ -272,26 +281,38 @@ class PolarDBGraphDB(BaseGraphDB):
 
     def _return_connection(self, connection):
         """Return a connection to the pool."""
-        if not self._pool_closed and connection:
-            try:
-                # Check if connection is closed
-                if hasattr(connection, "closed") and connection.closed != 0:
-                    # Connection is closed, just close it and don't return to pool
-                    try:
-                        connection.close()
-                    except Exception as e:
-                        logger.warning(f"Failed to close connection: {e}")
-                    return
-
-                # Connection is valid, return to pool
-                self.connection_pool.putconn(connection)
-            except Exception as e:
-                # If putconn fails, close the connection
-                logger.warning(f"Failed to return connection to pool: {e}")
+        if self._pool_closed:
+            # Pool is closed, just close the connection if it exists
+            if connection:
                 try:
                     connection.close()
                 except Exception as e:
-                    logger.warning(f"Failed to close connection: {e}")
+                    logger.warning(f"Failed to close connection after pool closed: {e}")
+            return
+
+        if not connection:
+            # No connection to return
+            return
+
+        try:
+            # Check if connection is closed
+            if hasattr(connection, "closed") and connection.closed != 0:
+                # Connection is closed, just close it explicitly and don't return to pool
+                try:
+                    connection.close()
+                except Exception as e:
+                    logger.warning(f"Failed to close closed connection: {e}")
+                return
+
+            # Connection is valid, return to pool
+            self.connection_pool.putconn(connection)
+        except Exception as e:
+            # If putconn fails, try to close the connection
+            logger.warning(f"Failed to return connection to pool: {e}")
+            try:
+                connection.close()
+            except Exception as close_error:
+                logger.warning(f"Failed to close connection after putconn error: {close_error}")
 
     def _return_connection_old(self, connection):
         """Return a connection to the pool."""
@@ -312,8 +333,9 @@ class PolarDBGraphDB(BaseGraphDB):
     def _create_graph(self):
         """Create PostgreSQL schema and table for graph storage."""
         # Get a connection from the pool
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 # Create schema if it doesn't exist
                 cursor.execute(f'CREATE SCHEMA IF NOT EXISTS "{self.db_name}_graph";')
@@ -377,8 +399,9 @@ class PolarDBGraphDB(BaseGraphDB):
         Note: This creates PostgreSQL indexes on the underlying tables.
         """
         # Get a connection from the pool
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 # Create indexes on the underlying PostgreSQL tables
                 # Apache AGE stores data in regular PostgreSQL tables
@@ -414,8 +437,9 @@ class PolarDBGraphDB(BaseGraphDB):
         params = [self.format_param_value(memory_type), self.format_param_value(user_name)]
 
         # Get a connection from the pool
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query, params)
                 result = cursor.fetchone()
@@ -440,8 +464,9 @@ class PolarDBGraphDB(BaseGraphDB):
         params = [self.format_param_value(scope), self.format_param_value(user_name)]
 
         # Get a connection from the pool
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query, params)
                 result = cursor.fetchone()
@@ -480,8 +505,9 @@ class PolarDBGraphDB(BaseGraphDB):
             self.format_param_value(user_name),
             keep_latest,
         ]
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 # Execute query to get IDs to delete
                 cursor.execute(select_query, select_params)
@@ -574,8 +600,9 @@ class PolarDBGraphDB(BaseGraphDB):
             params.append(self.format_param_value(user_name))
 
         # Get a connection from the pool
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query, params)
         except Exception as e:
@@ -604,8 +631,9 @@ class PolarDBGraphDB(BaseGraphDB):
             params.append(self.format_param_value(user_name))
 
         # Get a connection from the pool
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query, params)
         except Exception as e:
@@ -618,8 +646,9 @@ class PolarDBGraphDB(BaseGraphDB):
     def create_extension(self):
         extensions = [("polar_age", "Graph engine"), ("vector", "Vector engine")]
         # Get a connection from the pool
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 # Ensure in the correct database context
                 cursor.execute("SELECT current_database();")
@@ -649,8 +678,9 @@ class PolarDBGraphDB(BaseGraphDB):
     @timed
     def create_graph(self):
         # Get a connection from the pool
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(f"""
                     SELECT COUNT(*) FROM ag_catalog.ag_graph
@@ -676,9 +706,10 @@ class PolarDBGraphDB(BaseGraphDB):
         valid_rel_types = {"AGGREGATE_TO", "FOLLOWS", "INFERS", "MERGED_TO", "RELATE_TO", "PARENT"}
 
         for label_name in valid_rel_types:
-            conn = self._get_connection()
+            conn = None
             logger.info(f"Creating elabel: {label_name}")
             try:
+                conn = self._get_connection()
                 with conn.cursor() as cursor:
                     cursor.execute(f"select create_elabel('{self.db_name}_graph', '{label_name}');")
                     logger.info(f"Successfully created elabel: {label_name}")
@@ -725,8 +756,9 @@ class PolarDBGraphDB(BaseGraphDB):
             );
         """
 
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query, (source_id, target_id, type, json.dumps(properties)))
                 logger.info(f"Edge created: {source_id} -[{type}]-> {target_id}")
@@ -749,8 +781,9 @@ class PolarDBGraphDB(BaseGraphDB):
             DELETE FROM "{self.db_name}_graph"."Edges"
             WHERE source_id = %s AND target_id = %s AND edge_type = %s
         """
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query, (source_id, target_id, type))
                 logger.info(f"Edge deleted: {source_id} -[{type}]-> {target_id}")
@@ -810,8 +843,9 @@ class PolarDBGraphDB(BaseGraphDB):
             WHERE {where_clause}
             LIMIT 1
         """
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query, params)
                 result = cursor.fetchone()
@@ -865,8 +899,9 @@ class PolarDBGraphDB(BaseGraphDB):
         query += "\nRETURN r"
         query += "\n$$) AS (r agtype)"
 
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query)
                 result = cursor.fetchone()
@@ -904,8 +939,9 @@ class PolarDBGraphDB(BaseGraphDB):
             query += "\nAND ag_catalog.agtype_access_operator(properties, '\"user_name\"'::agtype) = %s::agtype"
             params.append(self.format_param_value(user_name))
 
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query, params)
                 result = cursor.fetchone()
@@ -994,8 +1030,9 @@ class PolarDBGraphDB(BaseGraphDB):
         query += " AND ag_catalog.agtype_access_operator(properties, '\"user_name\"'::agtype) = %s::agtype"
         params.append(self.format_param_value(user_name))
 
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query, params)
                 results = cursor.fetchall()
@@ -1252,8 +1289,9 @@ class PolarDBGraphDB(BaseGraphDB):
             WHERE t.cid::graphid = m.id;
         """
 
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query)
                 results = cursor.fetchall()
@@ -1361,89 +1399,158 @@ class PolarDBGraphDB(BaseGraphDB):
                     r)
                 $$ ) as (centers agtype, neighbors agtype, rels agtype);
             """
-        query = f"""
-            SELECT * FROM cypher('{self.db_name}_graph', $$
-                    MATCH(center: Memory)-[r * 1..{depth}]->(neighbor:Memory)
-                    WHERE
-                    center.id = '{center_id}'
-                    AND center.status = '{center_status}'
-                    AND center.user_name = '{user_name}'
-                    RETURN
-                    collect(DISTINCT
-                    center), collect(DISTINCT
-                    neighbor), collect(DISTINCT
-                    r)
-                $$ ) as (centers agtype, neighbors agtype, rels agtype);
-            """
-        conn = self._get_connection()
+        # Use UNION ALL for better performance: separate queries for depth 1 and depth 2
+        if depth == 1:
+            query = f"""
+                SELECT * FROM cypher('{self.db_name}_graph', $$
+                        MATCH(center: Memory)-[r]->(neighbor:Memory)
+                        WHERE
+                        center.id = '{center_id}'
+                        AND center.status = '{center_status}'
+                        AND center.user_name = '{user_name}'
+                        RETURN collect(DISTINCT center), collect(DISTINCT neighbor), collect(DISTINCT r)
+                    $$ ) as (centers agtype, neighbors agtype, rels agtype);
+                """
+        else:
+            # For depth >= 2, use UNION ALL to combine depth 1 and depth 2 queries
+            query = f"""
+                SELECT * FROM cypher('{self.db_name}_graph', $$
+                        MATCH(center: Memory)-[r]->(neighbor:Memory)
+                        WHERE
+                        center.id = '{center_id}'
+                        AND center.status = '{center_status}'
+                        AND center.user_name = '{user_name}'
+                        RETURN collect(DISTINCT center), collect(DISTINCT neighbor), collect(DISTINCT r)
+                UNION ALL
+                        MATCH(center: Memory)-[r]->(n:Memory)-[r1]->(neighbor:Memory)
+                        WHERE
+                       center.id = '{center_id}'
+                        AND center.status = '{center_status}'
+                        AND center.user_name = '{user_name}'
+                        RETURN collect(DISTINCT center), collect(DISTINCT neighbor), collect(DISTINCT r1)
+                    $$ ) as (centers agtype, neighbors agtype, rels agtype);
+                """
+        conn = None
         logger.info(f"[get_subgraph] Query: {query}")
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query)
-                result = cursor.fetchone()
+                results = cursor.fetchall()
 
-                if not result or not result[0]:
+                if not results:
                     return {"core_node": None, "neighbors": [], "edges": []}
 
-                # Parse center node
-                centers_data = result[0] if result[0] else "[]"
-                neighbors_data = result[1] if result[1] else "[]"
-                edges_data = result[2] if result[2] else "[]"
+                # Merge results from all UNION ALL rows
+                all_centers_list = []
+                all_neighbors_list = []
+                all_edges_list = []
 
-                # Parse JSON data
-                try:
-                    # Clean ::vertex and ::edge suffixes in data
-                    if isinstance(centers_data, str):
-                        centers_data = centers_data.replace("::vertex", "")
-                    if isinstance(neighbors_data, str):
-                        neighbors_data = neighbors_data.replace("::vertex", "")
-                    if isinstance(edges_data, str):
-                        edges_data = edges_data.replace("::edge", "")
+                for result in results:
+                    if not result or not result[0]:
+                        continue
 
-                    centers_list = (
-                        json.loads(centers_data) if isinstance(centers_data, str) else centers_data
-                    )
-                    neighbors_list = (
-                        json.loads(neighbors_data)
-                        if isinstance(neighbors_data, str)
-                        else neighbors_data
-                    )
-                    edges_list = (
-                        json.loads(edges_data) if isinstance(edges_data, str) else edges_data
-                    )
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse JSON data: {e}")
-                    return {"core_node": None, "neighbors": [], "edges": []}
+                    centers_data = result[0] if result[0] else "[]"
+                    neighbors_data = result[1] if result[1] else "[]"
+                    edges_data = result[2] if result[2] else "[]"
 
-                # Parse center node
+                    # Parse JSON data
+                    try:
+                        # Clean ::vertex and ::edge suffixes in data
+                        if isinstance(centers_data, str):
+                            centers_data = centers_data.replace("::vertex", "")
+                        if isinstance(neighbors_data, str):
+                            neighbors_data = neighbors_data.replace("::vertex", "")
+                        if isinstance(edges_data, str):
+                            edges_data = edges_data.replace("::edge", "")
+
+                        centers_list = (
+                            json.loads(centers_data)
+                            if isinstance(centers_data, str)
+                            else centers_data
+                        )
+                        neighbors_list = (
+                            json.loads(neighbors_data)
+                            if isinstance(neighbors_data, str)
+                            else neighbors_data
+                        )
+                        edges_list = (
+                            json.loads(edges_data) if isinstance(edges_data, str) else edges_data
+                        )
+
+                        # Collect data from this row
+                        if isinstance(centers_list, list):
+                            all_centers_list.extend(centers_list)
+                        if isinstance(neighbors_list, list):
+                            all_neighbors_list.extend(neighbors_list)
+                        if isinstance(edges_list, list):
+                            all_edges_list.extend(edges_list)
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Failed to parse JSON data: {e}")
+                        continue
+
+                # Deduplicate centers by ID
+                centers_dict = {}
+                for center_data in all_centers_list:
+                    if isinstance(center_data, dict) and "properties" in center_data:
+                        center_id_key = center_data["properties"].get("id")
+                        if center_id_key and center_id_key not in centers_dict:
+                            centers_dict[center_id_key] = center_data
+
+                # Parse center node (use first center)
                 core_node = None
-                if centers_list and len(centers_list) > 0:
-                    center_data = centers_list[0]
+                if centers_dict:
+                    center_data = next(iter(centers_dict.values()))
                     if isinstance(center_data, dict) and "properties" in center_data:
                         core_node = self._parse_node(center_data["properties"])
 
+                # Deduplicate neighbors by ID
+                neighbors_dict = {}
+                for neighbor_data in all_neighbors_list:
+                    if isinstance(neighbor_data, dict) and "properties" in neighbor_data:
+                        neighbor_id = neighbor_data["properties"].get("id")
+                        if neighbor_id and neighbor_id not in neighbors_dict:
+                            neighbors_dict[neighbor_id] = neighbor_data
+
                 # Parse neighbor nodes
                 neighbors = []
-                if isinstance(neighbors_list, list):
-                    for neighbor_data in neighbors_list:
-                        if isinstance(neighbor_data, dict) and "properties" in neighbor_data:
-                            neighbor_parsed = self._parse_node(neighbor_data["properties"])
-                            neighbors.append(neighbor_parsed)
+                for neighbor_data in neighbors_dict.values():
+                    if isinstance(neighbor_data, dict) and "properties" in neighbor_data:
+                        neighbor_parsed = self._parse_node(neighbor_data["properties"])
+                        neighbors.append(neighbor_parsed)
 
-                # Parse edges
-                edges = []
-                if isinstance(edges_list, list):
-                    for edge_group in edges_list:
-                        if isinstance(edge_group, list):
-                            for edge_data in edge_group:
-                                if isinstance(edge_data, dict):
-                                    edges.append(
-                                        {
-                                            "type": edge_data.get("label", ""),
-                                            "source": edge_data.get("start_id", ""),
-                                            "target": edge_data.get("end_id", ""),
-                                        }
-                                    )
+                # Deduplicate edges by (source, target, type)
+                edges_dict = {}
+                for edge_group in all_edges_list:
+                    if isinstance(edge_group, list):
+                        for edge_data in edge_group:
+                            if isinstance(edge_data, dict):
+                                edge_key = (
+                                    edge_data.get("start_id", ""),
+                                    edge_data.get("end_id", ""),
+                                    edge_data.get("label", ""),
+                                )
+                                if edge_key not in edges_dict:
+                                    edges_dict[edge_key] = {
+                                        "type": edge_data.get("label", ""),
+                                        "source": edge_data.get("start_id", ""),
+                                        "target": edge_data.get("end_id", ""),
+                                    }
+                    elif isinstance(edge_group, dict):
+                        # Handle single edge (not in a list)
+                        edge_key = (
+                            edge_group.get("start_id", ""),
+                            edge_group.get("end_id", ""),
+                            edge_group.get("label", ""),
+                        )
+                        if edge_key not in edges_dict:
+                            edges_dict[edge_key] = {
+                                "type": edge_group.get("label", ""),
+                                "source": edge_group.get("start_id", ""),
+                                "target": edge_group.get("end_id", ""),
+                            }
+
+                edges = list(edges_dict.values())
 
                 return self._convert_graph_edges(
                     {"core_node": core_node, "neighbors": neighbors, "edges": edges}
@@ -1460,7 +1567,98 @@ class PolarDBGraphDB(BaseGraphDB):
         raise NotImplementedError
 
     @timed
-    def seach_by_keywords(
+    def seach_by_keywords_like(
+        self,
+        query_word: str,
+        scope: str | None = None,
+        status: str | None = None,
+        search_filter: dict | None = None,
+        user_name: str | None = None,
+        filter: dict | None = None,
+        knowledgebase_ids: list[str] | None = None,
+        **kwargs,
+    ) -> list[dict]:
+        where_clauses = []
+
+        if scope:
+            where_clauses.append(
+                f"ag_catalog.agtype_access_operator(properties, '\"memory_type\"'::agtype) = '\"{scope}\"'::agtype"
+            )
+        if status:
+            where_clauses.append(
+                f"ag_catalog.agtype_access_operator(properties, '\"status\"'::agtype) = '\"{status}\"'::agtype"
+            )
+        else:
+            where_clauses.append(
+                "ag_catalog.agtype_access_operator(properties, '\"status\"'::agtype) = '\"activated\"'::agtype"
+            )
+
+        # Build user_name filter with knowledgebase_ids support (OR relationship) using common method
+        user_name_conditions = self._build_user_name_and_kb_ids_conditions_sql(
+            user_name=user_name,
+            knowledgebase_ids=knowledgebase_ids,
+            default_user_name=self.config.user_name,
+        )
+
+        # Add OR condition if we have any user_name conditions
+        if user_name_conditions:
+            if len(user_name_conditions) == 1:
+                where_clauses.append(user_name_conditions[0])
+            else:
+                where_clauses.append(f"({' OR '.join(user_name_conditions)})")
+
+        # Add search_filter conditions
+        if search_filter:
+            for key, value in search_filter.items():
+                if isinstance(value, str):
+                    where_clauses.append(
+                        f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = '\"{value}\"'::agtype"
+                    )
+                else:
+                    where_clauses.append(
+                        f"ag_catalog.agtype_access_operator(properties, '\"{key}\"'::agtype) = {value}::agtype"
+                    )
+
+        # Build filter conditions using common method
+        filter_conditions = self._build_filter_conditions_sql(filter)
+        where_clauses.extend(filter_conditions)
+
+        # Build key
+        where_clauses.append("""(properties -> '"memory"')::text LIKE %s""")
+        where_clause = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        query = f"""
+            SELECT
+                ag_catalog.agtype_access_operator(properties, '"id"'::agtype) AS old_id,
+                agtype_object_field_text(properties, 'memory') as memory_text
+            FROM "{self.db_name}_graph"."Memory"
+            {where_clause}
+            """
+
+        params = (query_word,)
+        logger.info(
+            f"[seach_by_keywords_LIKE start:]  user_name: {user_name}, query: {query}, params: {params}"
+        )
+        conn = None
+        try:
+            conn = self._get_connection()
+            with conn.cursor() as cursor:
+                cursor.execute(query, params)
+                results = cursor.fetchall()
+                output = []
+                for row in results:
+                    oldid = row[0]
+                    id_val = str(oldid)
+                    output.append({"id": id_val})
+                logger.info(
+                    f"[seach_by_keywords_LIKE end:] user_name: {user_name}, query: {query}, params: {params} recalled: {output}"
+                )
+                return output
+        finally:
+            self._return_connection(conn)
+
+    @timed
+    def seach_by_keywords_tfidf(
         self,
         query_words: list[str],
         scope: str | None = None,
@@ -1535,9 +1733,12 @@ class PolarDBGraphDB(BaseGraphDB):
         """
 
         params = (tsquery_string,)
-        logger.info(f"[search_by_fulltext] query: {query}, params: {params}")
-        conn = self._get_connection()
+        logger.info(
+            f"[seach_by_keywords_TFIDF start:] user_name: {user_name}, query: {query}, params: {params}"
+        )
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query, params)
                 results = cursor.fetchall()
@@ -1547,6 +1748,9 @@ class PolarDBGraphDB(BaseGraphDB):
                     id_val = str(oldid)
                     output.append({"id": id_val})
 
+                logger.info(
+                    f"[seach_by_keywords_TFIDF end:] user_name: {user_name}, query: {query}, params: {params} recalled: {output}"
+                )
                 return output
         finally:
             self._return_connection(conn)
@@ -1654,8 +1858,9 @@ class PolarDBGraphDB(BaseGraphDB):
 
         params = [tsquery_string, tsquery_string]
         logger.info(f"[search_by_fulltext] query: {query}, params: {params}")
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query, params)
                 results = cursor.fetchall()
@@ -1794,8 +1999,9 @@ class PolarDBGraphDB(BaseGraphDB):
 
         logger.info(f"[search_by_embedding] query: {query}, params: {params}")
 
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 try:
                     # If params is empty, execute query directly without parameters
@@ -1946,9 +2152,10 @@ class PolarDBGraphDB(BaseGraphDB):
            """
 
         ids = []
-        conn = self._get_connection()
+        conn = None
         logger.info(f"[get_by_metadata] cypher_query: {cypher_query}")
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(cypher_query)
                 results = cursor.fetchall()
@@ -2108,8 +2315,9 @@ class PolarDBGraphDB(BaseGraphDB):
             {where_clause}
             GROUP BY {", ".join(group_by_fields)}
         """
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 # Handle parameterized query
                 if params and isinstance(params, list):
@@ -2168,8 +2376,9 @@ class PolarDBGraphDB(BaseGraphDB):
                 DETACH DELETE n
                 $$) AS (result agtype)
             """
-            conn = self._get_connection()
+            conn = None
             try:
+                conn = self._get_connection()
                 with conn.cursor() as cursor:
                     cursor.execute(query)
                     logger.info("Cleared all nodes from database.")
@@ -2196,8 +2405,9 @@ class PolarDBGraphDB(BaseGraphDB):
             }
         """
         user_name = user_name if user_name else self._get_config_value("user_name")
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             # Export nodes
             if include_embedding:
                 node_query = f"""
@@ -2254,8 +2464,9 @@ class PolarDBGraphDB(BaseGraphDB):
         finally:
             self._return_connection(conn)
 
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             # Export edges using cypher query
             edge_query = f"""
                 SELECT * FROM cypher('{self.db_name}_graph', $$
@@ -2344,8 +2555,9 @@ class PolarDBGraphDB(BaseGraphDB):
                 RETURN count(n)
             $$) AS (count agtype)
         """
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             result = self.execute_query(query, conn)
             return int(result.one_or_none()["count"].value)
         finally:
@@ -2430,9 +2642,10 @@ class PolarDBGraphDB(BaseGraphDB):
                    """
             nodes = []
             node_ids = set()
-            conn = self._get_connection()
+            conn = None
             logger.info(f"[get_all_memory_items] cypher_query: {cypher_query}")
             try:
+                conn = self._get_connection()
                 with conn.cursor() as cursor:
                     cursor.execute(cypher_query)
                     results = cursor.fetchall()
@@ -2481,9 +2694,10 @@ class PolarDBGraphDB(BaseGraphDB):
                """
 
             nodes = []
-            conn = self._get_connection()
+            conn = None
             logger.info(f"[get_all_memory_items] cypher_query: {cypher_query}")
             try:
+                conn = self._get_connection()
                 with conn.cursor() as cursor:
                     cursor.execute(cypher_query)
                     results = cursor.fetchall()
@@ -2705,8 +2919,9 @@ class PolarDBGraphDB(BaseGraphDB):
 
         candidates = []
         node_ids = set()
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(cypher_query)
                 results = cursor.fetchall()
@@ -2953,8 +3168,10 @@ class PolarDBGraphDB(BaseGraphDB):
         elif len(embedding_vector) == 768:
             embedding_column = "embedding_768"
 
-        conn = self._get_connection()
+        conn = None
+        insert_query = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 # Delete existing record first (if any)
                 delete_query = f"""
@@ -2998,8 +3215,12 @@ class PolarDBGraphDB(BaseGraphDB):
                     logger.info(
                         f"[add_node] [embedding_vector-false] insert_query: {insert_query}, properties: {json.dumps(properties)}"
                     )
+        except Exception as e:
+            logger.error(f"[add_node] Failed to add node: {e}", exc_info=True)
+            raise
         finally:
-            logger.info(f"In add node polardb: id-{id} memory-{memory} query-{insert_query}")
+            if insert_query:
+                logger.info(f"In add node polardb: id-{id} memory-{memory} query-{insert_query}")
             self._return_connection(conn)
 
     def _build_node_from_agtype(self, node_agtype, embedding=None):
@@ -3107,8 +3328,9 @@ class PolarDBGraphDB(BaseGraphDB):
 
         logger.debug(f"[get_neighbors_by_tag] query: {query}, params: {params}")
 
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query, params)
                 results = cursor.fetchall()
@@ -3405,8 +3627,9 @@ class PolarDBGraphDB(BaseGraphDB):
             RETURN a.id AS from_id, b.id AS to_id, type(r) AS edge_type
             $$) AS (from_id agtype, to_id agtype, edge_type agtype)
         """
-        conn = self._get_connection()
+        conn = None
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 cursor.execute(query)
                 results = cursor.fetchall()
@@ -3584,7 +3807,7 @@ class PolarDBGraphDB(BaseGraphDB):
         if filter:
 
             def escape_cypher_string(value: str) -> str:
-                return value.replace("'", "\\'")
+                return value.replace("'", "''")
 
             def build_cypher_filter_condition(condition_dict: dict) -> str:
                 """Build a Cypher WHERE condition for a single filter item."""
@@ -4123,6 +4346,7 @@ class PolarDBGraphDB(BaseGraphDB):
             "node_type",
             "info",
             "source",
+            "file_ids",
         }
 
         def process_condition(condition):
@@ -4303,9 +4527,10 @@ class PolarDBGraphDB(BaseGraphDB):
         logger.info(f"[delete_node_by_prams] delete_query: {delete_query}")
         print(f"[delete_node_by_prams] delete_query: {delete_query}")
 
-        conn = self._get_connection()
+        conn = None
         deleted_count = 0
         try:
+            conn = self._get_connection()
             with conn.cursor() as cursor:
                 # Count nodes before deletion
                 cursor.execute(count_query)
