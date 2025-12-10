@@ -201,28 +201,53 @@ class PolarDBGraphDB(BaseGraphDB):
         return conn
 
     def _get_connection(self):
-        """Get a connection from the pool."""
+        """
+        Get a connection from the pool.
+
+        This function:
+        1. Gets a connection from ThreadedConnectionPool
+        2. Checks if connection is closed or unhealthy
+        3. Returns healthy connection or retries (max 3 times)
+        4. Handles connection pool exhaustion gracefully
+
+        Returns:
+            psycopg2 connection object
+
+        Raises:
+            RuntimeError: If connection pool is closed or exhausted after retries
+        """
         if self._pool_closed:
             raise RuntimeError("Connection pool has been closed")
 
-        max_retries = 3
+        max_retries = 5
+        import psycopg2.pool
+
         for attempt in range(max_retries):
             conn = None
             try:
+                # Try to get connection from pool
+                # This may raise PoolError if pool is exhausted
                 conn = self.connection_pool.getconn()
 
                 # Check if connection is closed
                 if conn.closed != 0:
                     # Connection is closed, return it to pool with close flag and try again
+                    logger.warning(
+                        f"[_get_connection] Got closed connection, attempt {attempt + 1}/{max_retries}"
+                    )
                     try:
                         self.connection_pool.putconn(conn, close=True)
                     except Exception as e:
-                        logger.warning(f"Failed to return closed connection to pool: {e}")
+                        logger.warning(
+                            f"[_get_connection] Failed to return closed connection to pool: {e}"
+                        )
                         with suppress(Exception):
                             conn.close()
 
                     conn = None
                     if attempt < max_retries - 1:
+                        # Exponential backoff: 0.1s, 0.2s, 0.4s
+                        time.sleep(0.1 * (2**attempt))
                         continue
                     else:
                         raise RuntimeError("Pool returned a closed connection after all retries")
@@ -239,19 +264,21 @@ class PolarDBGraphDB(BaseGraphDB):
                 except Exception as health_check_error:
                     # Connection is not usable, return it to pool with close flag and try again
                     logger.warning(
-                        f"Connection health check failed: {health_check_error}, returning connection to pool and retrying..."
+                        f"[_get_connection] Connection health check failed (attempt {attempt + 1}/{max_retries}): {health_check_error}"
                     )
                     try:
                         self.connection_pool.putconn(conn, close=True)
                     except Exception as putconn_error:
                         logger.warning(
-                            f"Failed to return unhealthy connection to pool: {putconn_error}"
+                            f"[_get_connection] Failed to return unhealthy connection to pool: {putconn_error}"
                         )
                         with suppress(Exception):
                             conn.close()
 
                     conn = None
                     if attempt < max_retries - 1:
+                        # Exponential backoff: 0.1s, 0.2s, 0.4s
+                        time.sleep(0.1 * (2**attempt))
                         continue
                     else:
                         raise RuntimeError(
@@ -260,62 +287,132 @@ class PolarDBGraphDB(BaseGraphDB):
 
                 # Connection is healthy, return it
                 return conn
+
+            except psycopg2.pool.PoolError as pool_error:
+                # Pool exhausted or other pool-related error
+                # Don't retry immediately for pool exhaustion - it's unlikely to resolve quickly
+                error_msg = str(pool_error).lower()
+                if "exhausted" in error_msg or "pool" in error_msg:
+                    # Log pool status for debugging
+                    try:
+                        # Try to get pool stats if available
+                        pool_info = f"Pool config: minconn={self.connection_pool.minconn}, maxconn={self.connection_pool.maxconn}"
+                        logger.error(
+                            f"[_get_connection] Connection pool exhausted (attempt {attempt + 1}/{max_retries}). {pool_info}"
+                        )
+                    except Exception:
+                        logger.error(
+                            f"[_get_connection] Connection pool exhausted (attempt {attempt + 1}/{max_retries})"
+                        )
+
+                    # For pool exhaustion, wait longer before retry (connections may be returned)
+                    if attempt < max_retries - 1:
+                        # Longer backoff for pool exhaustion: 0.5s, 1.0s, 2.0s
+                        wait_time = 0.5 * (2**attempt)
+                        logger.info(f"[_get_connection] Waiting {wait_time}s before retry...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        raise RuntimeError(
+                            f"Connection pool exhausted after {max_retries} attempts. "
+                            f"This usually means connections are not being returned to the pool. "
+                            f"Check for connection leaks in your code."
+                        ) from pool_error
+                else:
+                    # Other pool errors - retry with normal backoff
+                    if attempt < max_retries - 1:
+                        time.sleep(0.1 * (2**attempt))
+                        continue
+                    else:
+                        raise RuntimeError(
+                            f"Failed to get connection from pool: {pool_error}"
+                        ) from pool_error
+
             except Exception as e:
+                # Other exceptions (not pool-related)
                 # Only try to return connection if we actually got one
                 # If getconn() failed (e.g., pool exhausted), conn will be None
                 if conn is not None:
                     try:
-                        # If it's a PoolError or similar, close the connection instead of returning
-                        if "pool" in str(e).lower() or "exhausted" in str(e).lower():
-                            with suppress(Exception):
-                                conn.close()
-                        else:
-                            self.connection_pool.putconn(conn, close=True)
+                        # Return connection to pool if it's valid
+                        self.connection_pool.putconn(conn, close=True)
                     except Exception as putconn_error:
-                        logger.warning(f"Failed to handle connection after error: {putconn_error}")
+                        logger.warning(
+                            f"[_get_connection] Failed to return connection after error: {putconn_error}"
+                        )
                         with suppress(Exception):
                             conn.close()
 
                 if attempt >= max_retries - 1:
                     raise RuntimeError(f"Failed to get a valid connection from pool: {e}") from e
                 else:
-                    time.sleep(0.1)
+                    # Exponential backoff: 0.1s, 0.2s, 0.4s
+                    time.sleep(0.1 * (2**attempt))
                 continue
 
+        # Should never reach here, but just in case
+        raise RuntimeError("Failed to get connection after all retries")
+
     def _return_connection(self, connection):
-        """Return a connection to the pool."""
+        """
+        Return a connection to the pool.
+
+        This function safely returns a connection to the pool, handling:
+        - Closed connections (close them instead of returning)
+        - Pool closed state (close connection directly)
+        - None connections (no-op)
+        - putconn() failures (close connection as fallback)
+
+        Args:
+            connection: psycopg2 connection object or None
+        """
         if self._pool_closed:
             # Pool is closed, just close the connection if it exists
             if connection:
                 try:
                     connection.close()
+                    logger.debug("[_return_connection] Closed connection (pool is closed)")
                 except Exception as e:
-                    logger.warning(f"Failed to close connection after pool closed: {e}")
+                    logger.warning(
+                        f"[_return_connection] Failed to close connection after pool closed: {e}"
+                    )
             return
 
         if not connection:
-            # No connection to return
+            # No connection to return - this is normal if _get_connection() failed
             return
 
         try:
             # Check if connection is closed
             if hasattr(connection, "closed") and connection.closed != 0:
                 # Connection is closed, just close it explicitly and don't return to pool
+                logger.debug(
+                    "[_return_connection] Connection is closed, closing it instead of returning to pool"
+                )
                 try:
                     connection.close()
                 except Exception as e:
-                    logger.warning(f"Failed to close closed connection: {e}")
+                    logger.warning(f"[_return_connection] Failed to close closed connection: {e}")
                 return
 
             # Connection is valid, return to pool
             self.connection_pool.putconn(connection)
+            logger.debug("[_return_connection] Successfully returned connection to pool")
         except Exception as e:
             # If putconn fails, try to close the connection
-            logger.warning(f"Failed to return connection to pool: {e}")
+            # This prevents connection leaks if putconn() fails
+            logger.error(
+                f"[_return_connection] Failed to return connection to pool: {e}", exc_info=True
+            )
             try:
                 connection.close()
+                logger.debug(
+                    "[_return_connection] Closed connection as fallback after putconn failure"
+                )
             except Exception as close_error:
-                logger.warning(f"Failed to close connection after putconn error: {close_error}")
+                logger.warning(
+                    f"[_return_connection] Failed to close connection after putconn error: {close_error}"
+                )
 
     def _return_connection_old(self, connection):
         """Return a connection to the pool."""
@@ -3226,6 +3323,252 @@ class PolarDBGraphDB(BaseGraphDB):
                 logger.info(f"In add node polardb: id-{id} memory-{memory} query-{insert_query}")
             self._return_connection(conn)
 
+    @timed
+    def add_nodes_batch(
+        self,
+        nodes: list[dict[str, Any]],
+        user_name: str | None = None,
+    ) -> None:
+        """
+        Batch add multiple memory nodes to the graph.
+
+        Args:
+            nodes: List of node dictionaries, each containing:
+                - id: str - Node ID
+                - memory: str - Memory content
+                - metadata: dict[str, Any] - Node metadata
+            user_name: Optional user name (will use config default if not provided)
+        """
+        if not nodes:
+            logger.warning("[add_nodes_batch] Empty nodes list, skipping")
+            return
+
+        logger.info(f"[add_nodes_batch] Adding {len(nodes)} nodes")
+
+        # user_name comes from parameter; fallback to config if missing
+        effective_user_name = user_name if user_name else self.config.user_name
+
+        # Prepare all nodes
+        prepared_nodes = []
+        for node_data in nodes:
+            try:
+                id = node_data["id"]
+                memory = node_data["memory"]
+                metadata = node_data.get("metadata", {})
+
+                logger.debug(f"[add_nodes_batch] Processing node id: {id}")
+
+                # Set user_name in metadata
+                metadata["user_name"] = effective_user_name
+
+                metadata = _prepare_node_metadata(metadata)
+
+                # Merge node and set metadata
+                created_at = metadata.pop("created_at", datetime.utcnow().isoformat())
+                updated_at = metadata.pop("updated_at", datetime.utcnow().isoformat())
+
+                # Prepare properties
+                properties = {
+                    "id": id,
+                    "memory": memory,
+                    "created_at": created_at,
+                    "updated_at": updated_at,
+                    **metadata,
+                }
+
+                # Generate embedding if not provided
+                if "embedding" not in properties or not properties["embedding"]:
+                    properties["embedding"] = generate_vector(
+                        self._get_config_value("embedding_dimension", 1024)
+                    )
+
+                # Serialization - JSON-serialize sources and usage fields
+                for field_name in ["sources", "usage"]:
+                    if properties.get(field_name):
+                        if isinstance(properties[field_name], list):
+                            for idx in range(len(properties[field_name])):
+                                # Serialize only when element is not a string
+                                if not isinstance(properties[field_name][idx], str):
+                                    properties[field_name][idx] = json.dumps(
+                                        properties[field_name][idx]
+                                    )
+                        elif isinstance(properties[field_name], str):
+                            # If already a string, leave as-is
+                            pass
+
+                # Extract embedding for separate column
+                embedding_vector = properties.pop("embedding", [])
+                if not isinstance(embedding_vector, list):
+                    embedding_vector = []
+
+                # Select column name based on embedding dimension
+                embedding_column = "embedding"  # default column
+                if len(embedding_vector) == 3072:
+                    embedding_column = "embedding_3072"
+                elif len(embedding_vector) == 1024:
+                    embedding_column = "embedding"
+                elif len(embedding_vector) == 768:
+                    embedding_column = "embedding_768"
+
+                prepared_nodes.append(
+                    {
+                        "id": id,
+                        "memory": memory,
+                        "properties": properties,
+                        "embedding_vector": embedding_vector,
+                        "embedding_column": embedding_column,
+                    }
+                )
+            except Exception as e:
+                logger.error(
+                    f"[add_nodes_batch] Failed to prepare node {node_data.get('id', 'unknown')}: {e}",
+                    exc_info=True,
+                )
+                # Continue with other nodes
+                continue
+
+        if not prepared_nodes:
+            logger.warning("[add_nodes_batch] No valid nodes to insert after preparation")
+            return
+
+        # Group nodes by embedding column to optimize batch inserts
+        nodes_by_embedding_column = {}
+        for node in prepared_nodes:
+            col = node["embedding_column"]
+            if col not in nodes_by_embedding_column:
+                nodes_by_embedding_column[col] = []
+            nodes_by_embedding_column[col].append(node)
+
+        conn = None
+        try:
+            conn = self._get_connection()
+            with conn.cursor() as cursor:
+                # Process each group separately
+                for embedding_column, nodes_group in nodes_by_embedding_column.items():
+                    # Batch delete existing records using IN clause
+                    ids_to_delete = [node["id"] for node in nodes_group]
+                    if ids_to_delete:
+                        delete_query = f"""
+                            DELETE FROM {self.db_name}_graph."Memory"
+                            WHERE id IN (
+                                SELECT ag_catalog._make_graph_id('{self.db_name}_graph'::name, 'Memory'::name, unnest(%s::text[])::cstring)
+                            )
+                        """
+                        cursor.execute(delete_query, (ids_to_delete,))
+
+                    # Batch get graph_ids for all nodes
+                    get_graph_ids_query = f"""
+                        SELECT
+                            id_val,
+                            ag_catalog._make_graph_id('{self.db_name}_graph'::name, 'Memory'::name, id_val::text::cstring) as graph_id
+                        FROM unnest(%s::text[]) as id_val
+                    """
+                    cursor.execute(get_graph_ids_query, (ids_to_delete,))
+                    graph_id_map = {row[0]: row[1] for row in cursor.fetchall()}
+
+                    # Add graph_id to properties
+                    for node in nodes_group:
+                        graph_id = graph_id_map.get(node["id"])
+                        if graph_id:
+                            node["properties"]["graph_id"] = str(graph_id)
+
+                    # Batch insert using VALUES with multiple rows
+                    # Use psycopg2.extras.execute_values for efficient batch insert
+                    from psycopg2.extras import execute_values
+
+                    if embedding_column and any(node["embedding_vector"] for node in nodes_group):
+                        # Prepare data tuples for batch insert with embedding
+                        data_tuples = []
+                        for node in nodes_group:
+                            # Each tuple: (id, properties_json, embedding_json)
+                            data_tuples.append(
+                                (
+                                    node["id"],
+                                    json.dumps(node["properties"]),
+                                    json.dumps(node["embedding_vector"])
+                                    if node["embedding_vector"]
+                                    else None,
+                                )
+                            )
+
+                        # Build the INSERT query template
+                        insert_query = f"""
+                            INSERT INTO {self.db_name}_graph."Memory"(id, properties, {embedding_column})
+                            VALUES %s
+                        """
+
+                        # Build the VALUES template for execute_values
+                        # Each row: (graph_id_function, agtype, vector)
+                        # Note: properties column is agtype, not jsonb
+                        template = f"""
+                            (
+                                ag_catalog._make_graph_id('{self.db_name}_graph'::name, 'Memory'::name, %s::text::cstring),
+                                %s::text::agtype,
+                                %s::vector
+                            )
+                        """
+                        logger.info(
+                            f"[add_nodes_batch] embedding_column Inserting insert_query:{insert_query}"
+                        )
+                        logger.info(
+                            f"[add_nodes_batch] embedding_column Inserting data_tuples:{data_tuples}"
+                        )
+
+                        # Execute batch insert
+                        execute_values(
+                            cursor,
+                            insert_query,
+                            data_tuples,
+                            template=template,
+                            page_size=100,  # Insert in batches of 100
+                        )
+                    else:
+                        # Prepare data tuples for batch insert without embedding
+                        data_tuples = []
+                        for node in nodes_group:
+                            # Each tuple: (id, properties_json)
+                            data_tuples.append(
+                                (
+                                    node["id"],
+                                    json.dumps(node["properties"]),
+                                )
+                            )
+
+                        # Build the INSERT query template
+                        insert_query = f"""
+                            INSERT INTO {self.db_name}_graph."Memory"(id, properties)
+                            VALUES %s
+                        """
+
+                        # Build the VALUES template for execute_values
+                        # Note: properties column is agtype, not jsonb
+                        template = f"""
+                            (
+                                ag_catalog._make_graph_id('{self.db_name}_graph'::name, 'Memory'::name, %s::text::cstring),
+                                %s::text::agtype
+                            )
+                        """
+                        logger.info(f"[add_nodes_batch] Inserting insert_query:{insert_query}")
+                        logger.info(f"[add_nodes_batch] Inserting data_tuples:{data_tuples}")
+                        # Execute batch insert
+                        execute_values(
+                            cursor,
+                            insert_query,
+                            data_tuples,
+                            template=template,
+                            page_size=100,  # Insert in batches of 100
+                        )
+
+                    logger.info(
+                        f"[add_nodes_batch] Inserted {len(nodes_group)} nodes with embedding_column={embedding_column}"
+                    )
+
+        except Exception as e:
+            logger.error(f"[add_nodes_batch] Failed to add nodes: {e}", exc_info=True)
+            raise
+        finally:
+            self._return_connection(conn)
+
     def _build_node_from_agtype(self, node_agtype, embedding=None):
         """
         Parse the cypher-returned column `n` (agtype or JSON string)
@@ -3810,7 +4153,7 @@ class PolarDBGraphDB(BaseGraphDB):
         if filter:
 
             def escape_cypher_string(value: str) -> str:
-                return value.replace("'", "''")
+                return value.replace("'", "\\'")
 
             def build_cypher_filter_condition(condition_dict: dict) -> str:
                 """Build a Cypher WHERE condition for a single filter item."""
@@ -4498,7 +4841,7 @@ class PolarDBGraphDB(BaseGraphDB):
 
         # Then, combine with user_name condition using AND (must match user_name AND one of the data conditions)
         user_name_where = " OR ".join(user_name_conditions)
-        ids_where = f"({user_name_where}) AND ({data_conditions})"
+        ids_where = f"{user_name_where} AND ({data_conditions})"
 
         # Use Cypher DELETE query
         # First count matching nodes to get accurate count
