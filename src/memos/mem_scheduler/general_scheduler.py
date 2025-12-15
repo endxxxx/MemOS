@@ -1,7 +1,6 @@
 import concurrent.futures
 import contextlib
 import json
-import os
 import traceback
 
 from memos.configs.mem_scheduler import GeneralSchedulerConfig
@@ -30,7 +29,10 @@ from memos.mem_scheduler.utils.filter_utils import (
     is_all_english,
     transform_name_to_key,
 )
-from memos.mem_scheduler.utils.misc_utils import group_messages_by_user_and_mem_cube
+from memos.mem_scheduler.utils.misc_utils import (
+    group_messages_by_user_and_mem_cube,
+    is_cloud_env,
+)
 from memos.memories.textual.item import TextualMemoryItem
 from memos.memories.textual.preference import PreferenceTextMemory
 from memos.memories.textual.tree import TreeTextMemory
@@ -126,7 +128,10 @@ class GeneralScheduler(BaseScheduler):
             top_k=self.top_k,
         )
         logger.info(
-            f"[long_memory_update_process] Processed {len(queries)} queries {queries} and retrieved {len(new_candidates)} new candidate memories for user_id={user_id}"
+            # Build the candidate preview string outside the f-string to avoid backslashes in expression
+            f"[long_memory_update_process] Processed {len(queries)} queries {queries} and retrieved {len(new_candidates)} "
+            f"new candidate memories for user_id={user_id}: "
+            + ("\n- " + "\n- ".join([f"{one.id}: {one.memory}" for one in new_candidates]))
         )
 
         # rerank
@@ -141,10 +146,14 @@ class GeneralScheduler(BaseScheduler):
             f"[long_memory_update_process] Final working memory size: {len(new_order_working_memory)} memories for user_id={user_id}"
         )
 
-        old_memory_texts = [mem.memory for mem in cur_working_memory]
-        new_memory_texts = [mem.memory for mem in new_order_working_memory]
+        old_memory_texts = "\n- " + "\n- ".join(
+            [f"{one.id}: {one.memory}" for one in cur_working_memory]
+        )
+        new_memory_texts = "\n- " + "\n- ".join(
+            [f"{one.id}: {one.memory}" for one in new_order_working_memory]
+        )
 
-        logger.debug(
+        logger.info(
             f"[long_memory_update_process] For user_id='{user_id}', mem_cube_id='{mem_cube_id}': "
             f"Scheduler replaced working memory based on query history {queries}. "
             f"Old working memory ({len(old_memory_texts)} items): {old_memory_texts}. "
@@ -187,12 +196,9 @@ class GeneralScheduler(BaseScheduler):
                             f"prepared_add_items: {prepared_add_items};\n prepared_update_items_with_original: {prepared_update_items_with_original}"
                         )
                         # Conditional Logging: Knowledge Base (Cloud Service) vs. Playground/Default
-                        is_cloud_env = (
-                            os.getenv("MEMSCHEDULER_RABBITMQ_EXCHANGE_NAME")
-                            == "memos-memory-change"
-                        )
+                        cloud_env = is_cloud_env()
 
-                        if is_cloud_env:
+                        if cloud_env:
                             self.send_add_log_messages_to_cloud_env(
                                 msg, prepared_add_items, prepared_update_items_with_original
                             )
@@ -604,14 +610,15 @@ class GeneralScheduler(BaseScheduler):
                 feedback_content=feedback_data.get("feedback_content"),
                 feedback_time=feedback_data.get("feedback_time"),
                 task_id=task_id,
+                info=feedback_data.get("info", None),
             )
 
             logger.info(
                 f"Successfully processed feedback for user_id={user_id}, mem_cube_id={mem_cube_id}"
             )
 
-            is_cloud_env = os.getenv("MEMSCHEDULER_RABBITMQ_EXCHANGE_NAME") == "memos-memory-change"
-            if is_cloud_env:
+            cloud_env = is_cloud_env()
+            if cloud_env:
                 record = feedback_result.get("record") if isinstance(feedback_result, dict) else {}
                 add_records = record.get("add") if isinstance(record, dict) else []
                 update_records = record.get("update") if isinstance(record, dict) else []
@@ -728,7 +735,7 @@ class GeneralScheduler(BaseScheduler):
             else:
                 logger.info(
                     "Skipping web log for feedback. Not in a cloud environment (is_cloud_env=%s)",
-                    is_cloud_env,
+                    cloud_env,
                 )
 
         except Exception as e:
@@ -888,10 +895,8 @@ class GeneralScheduler(BaseScheduler):
 
                     # LOGGING BLOCK START
                     # This block is replicated from _add_message_consumer to ensure consistent logging
-                    is_cloud_env = (
-                        os.getenv("MEMSCHEDULER_RABBITMQ_EXCHANGE_NAME") == "memos-memory-change"
-                    )
-                    if is_cloud_env:
+                    cloud_env = is_cloud_env()
+                    if cloud_env:
                         # New: Knowledge Base Logging (Cloud Service)
                         kb_log_content = []
                         for item in flattened_memories:
@@ -1010,10 +1015,8 @@ class GeneralScheduler(BaseScheduler):
                 f"Error in _process_memories_with_reader: {traceback.format_exc()}", exc_info=True
             )
             with contextlib.suppress(Exception):
-                is_cloud_env = (
-                    os.getenv("MEMSCHEDULER_RABBITMQ_EXCHANGE_NAME") == "memos-memory-change"
-                )
-                if is_cloud_env:
+                cloud_env = is_cloud_env()
+                if cloud_env:
                     if not kb_log_content:
                         trigger_source = (
                             info.get("trigger_source", "Messages") if info else "Messages"
@@ -1412,20 +1415,21 @@ class GeneralScheduler(BaseScheduler):
             logger.info(
                 f"[process_session_turn] Searching for missing evidence: '{item}' with top_k={k_per_evidence} for user_id={user_id}"
             )
-            info = {
-                "user_id": user_id,
-                "session_id": "",
-            }
 
+            search_args = {}
             results: list[TextualMemoryItem] = self.retriever.search(
                 query=item,
+                user_id=user_id,
+                mem_cube_id=mem_cube_id,
                 mem_cube=mem_cube,
                 top_k=k_per_evidence,
                 method=self.search_method,
-                info=info,
+                search_args=search_args,
             )
+
             logger.info(
-                f"[process_session_turn] Search results for missing evidence '{item}': {[one.memory for one in results]}"
+                f"[process_session_turn] Search results for missing evidence '{item}': "
+                + ("\n- " + "\n- ".join([f"{one.id}: {one.memory}" for one in results]))
             )
             new_candidates.extend(results)
         return cur_working_memory, new_candidates
