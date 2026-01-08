@@ -33,6 +33,8 @@ from memos.api.product_models import (
     ChatRequest,
     DeleteMemoryRequest,
     DeleteMemoryResponse,
+    ExistMemCubeIdRequest,
+    ExistMemCubeIdResponse,
     GetMemoryPlaygroundRequest,
     GetMemoryRequest,
     GetMemoryResponse,
@@ -88,6 +90,7 @@ redis_client = components["redis_client"]
 status_tracker = TaskStatusTracker(redis_client=redis_client)
 embedder = components["embedder"]
 graph_db = components["graph_db"]
+vector_db = components["vector_db"]
 
 
 # =============================================================================
@@ -357,8 +360,29 @@ def get_user_names_by_memory_ids(request: GetUserNamesByMemoryIdsRequest):
             ),
         )
     result = graph_db.get_user_names_by_memory_ids(memory_ids=request.memory_ids)
+    if vector_db:
+        prefs = []
+        for collection_name in ["explicit_preference", "implicit_preference"]:
+            prefs.extend(
+                vector_db.get_by_ids(collection_name=collection_name, ids=request.memory_ids)
+            )
+        result.update({pref.id: pref.payload.get("mem_cube_id", None) for pref in prefs})
     return GetUserNamesByMemoryIdsResponse(
         code=200,
         message="Successfully",
         data=result,
+    )
+
+
+@router.post(
+    "/exist_mem_cube_id",
+    summary="Check if mem cube id exists",
+    response_model=ExistMemCubeIdResponse,
+)
+def exist_mem_cube_id(request: ExistMemCubeIdRequest):
+    """Check if mem cube id exists."""
+    return ExistMemCubeIdResponse(
+        code=200,
+        message="Successfully",
+        data=graph_db.exist_user_name(user_name=request.mem_cube_id),
     )
