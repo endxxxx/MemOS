@@ -223,6 +223,7 @@ ${conversation}
 
 您的输出："""
 
+
 SIMPLE_STRUCT_DOC_READER_PROMPT = """You are an expert text analyst for a search and retrieval system.
 Your task is to process a document chunk and generate a single, structured JSON object.
 
@@ -796,43 +797,48 @@ Important: Output **only** the JSON. No extra text, explanations, markdown, or f
 """
 
 SIMPLE_STRUCT_HALLUCINATION_FILTER_PROMPT = """
-You are a strict memory validator.
-Your task is to identify and delete hallucinated memories that are not explicitly stated by the user in the provided messages.
+ You are a strict memory validator.
+ Your task is to identify and delete hallucinated memories that are not explicitly stated by the user in the provided messages.
 
-Rules:
-1. **User-Only Origin**: Verify facts against USER messages ONLY. If the Assistant repeats a User fact, it is VALID. If the Assistant introduces a new detail (e.g., 'philanthropy') that the User did not explicitly confirm, it is INVALID.
-2. **No Inference Allowed**: Do NOT keep memories based on implication, emotion, preference, or generalization. Only verbatim or direct restatements of user-provided facts are valid. However, minor formatting corrections (e.g., adding missing spaces between names, fixing obvious typos) are ALLOWED.
-3. **Hallucination = Deletion**: If a memory contains any detail not directly expressed by the user, mark it for deletion.
-4. **Timestamp Exception**: Memories may include timestamps (e.g., dates like "On December 19, 2026") derived from conversation metadata. If the date in the memory is likely the conversation time (even if not shown in the `messages` list), do NOT treat it as a hallucination or require a rewrite.
+ Rules:
+ 1. **Explicit Denial & Inconsistency**: If a memory claims something that the user explicitly denied or is clearly inconsistent with the user's statements, mark it for deletion.
+ 2. **Timestamp Exception**: Memories may include timestamps (e.g., dates like "On December 19, 2026") derived from conversation metadata. If the date in the memory is likely the conversation time (even if not shown in the `messages` list), do NOT treat it as a hallucination or require a rewrite.
 
-Examples:
-Messages:
-- [user]: I love coding in Python.
-- [assistant]: That's great! I assume you also contribute to open source projects?
-Memory: User enjoys Python and contributes to open source.
-Result: {{"keep": false, "reason": "User never stated they contribute to open source; this came from Assistant's assumption."}}
+ Example:
+ Messages:
+ [user]: I'm planning a trip to Japan next month for about a week.
+ [assistant]: That sounds great! Are you planning to visit Tokyo Disneyland?
+ [user]: No, I won't be going to Tokyo this time. I plan to stay in Kyoto and Osaka to avoid crowds.
 
-Messages:
-- [user]: I am tired.
-- [assistant]: I hear you are tired. Rest is important.
-Memory: User stated they are tired.
-Result: {{"keep": true, "reason": "Direct restatement of user input, even if Assistant repeated it."}}
+ Memories:
+ {{
+   "0": "User plans to travel to Japan for a week next month.",
+   "1": "User intends to visit Tokyo Disneyland.",
+   "2": "User plans to stay in Kyoto and Osaka."
+ }}
 
-Inputs:
-messages:
-{messages_inline}
+ Output:
+ {{
+   "0": {{ "keep": true, "reason": "Explicitly stated by user." }},
+   "1": {{ "keep": false, "reason": "User explicitly denied visiting Tokyo." }},
+   "2": {{ "keep": true, "reason": "Explicitly stated by user." }}
+ }}
 
-memories:
-{memories_inline}
+ Inputs:
+ Messages:
+ {messages_inline}
 
-Output Format:
-- Return a JSON object with string keys ("0", "1", "2", ...) matching the input memory indices.
-- Each value must be: {{ "keep": boolean, "reason": string }}
-- "keep": true only if the memory is a direct reflection of the user's explicit words.
-- "reason": brief, factual, and cites missing or unsupported content.
+ Memories:
+ {memories_inline}
 
-Important: Output **only** the JSON. No extra text, explanations, markdown, or fields.
-"""
+ Output Format:
+ - Return a JSON object with string keys ("0", "1", "2", ...) matching the input memory indices.
+ - Each value must be: {{ "keep": boolean, "reason": string }}
+ - "keep": true only if the memory is a direct reflection of the user's explicit words.
+ - "reason": brief, factual, and cites missing or unsupported content.
+
+ Important: Output **only** the JSON. No extra text, explanations, markdown, or fields.
+ """
 
 
 SIMPLE_STRUCT_ADD_BEFORE_SEARCH_PROMPT = """
@@ -861,10 +867,174 @@ Output Format:
 Important: Output **only** the JSON. No extra text.
 """
 
+MEMORY_MERGE_PROMPT_EN = """You are a memory consolidation expert. Given a new memory and a set of similar existing memories, determine whether they should be merged.
+
+Before generating the value, you must complete the following reasoning steps (done in internal reasoning, no need to output them):
+1.	Identify the “fact units” contained in the new memory, for example:
+•	Identity-type facts: name, occupation, place of residence, etc.
+•	Stable preference-type facts: things the user likes/dislikes long-term, frequently visited places, etc.
+•	Relationship-type facts: relationships with someone (friend, colleague, fixed activity partner, etc.)
+•	One-off event/plan-type facts: events on a specific day, temporary plans for this weekend, etc.
+2.	For each fact unit, determine:
+•	Which existing memories are expressing “the same kind of fact”
+•	Whether the corresponding fact in the new memory is just a “repeated confirmation” of that fact, rather than “new factual content”
+
+Merge rules (must be followed when generating value):
+•	The merged value:
+•	Must not repeat the same meaning (each fact should be described only once)
+•	Must not repeat the same fact just because it was mentioned multiple times or at different times
+•	Unless time itself changes the meaning (for example, “used to dislike → now likes”), do not keep specific time information
+•	If the new memory contains multiple different types of facts (for example: “name + hobby + plan for this weekend”):
+•	You may output multiple merge results; each merge result should focus on only one type of fact (for example: one about “name”, one about “hobby”)
+•	Do not force unrelated facts into the same value
+•	One-off events/plans (such as “going skiing this weekend”, “attending a party on Sunday”):
+•	If there is no directly related and complementary event memory in the existing memories, treat it as an independent memory and do not merge it with identity/stable preference-type memories
+•	Do not merge a “temporary plan” and a “long-term preference” into the same value just because they are related (e.g. a plan to ski vs. a long-term preference for skiing)
+
+Output format requirements:
+•	You must return a single JSON object.
+•	If a merge occurred:
+•	“value”: The merged memory content (only describe the final conclusion, preserving all “semantically unique” information, without repetition)
+•	“merged_from”: A list of IDs of the similar memories that were merged
+•	“should_merge”: true
+•	If the new memory cannot be merged with any existing memories, return:
+•	“should_merge”: false
+
+Example:
+New memory:
+The user’s name is Tom, the user likes skiing, and plans to go skiing this weekend.
+
+Similar existing memories:
+xxxx-xxxx-xxxx-xxxx-01: The user’s name is Tom
+xxxx-xxxx-xxxx-xxxx-10: The user likes skiing
+xxxx-xxxx-xxxx-xxxx-11: The user lives by the sea
+
+Expected return value:
+{{
+"value": "The user's name is Tom and the user likes skiing",
+"merged_from": ["xxxx-xxxx-xxxx-xxxx-01", "xxxx-xxxx-xxxx-xxxx-10"],
+"should_merge": true
+}}
+
+New memory:
+The user is going to attend a party on Sunday.
+
+Similar existing memories:
+xxxx-xxxx-xxxx-xxxx-01: The user read a book yesterday.
+
+Expected return value:
+{{
+"should_merge": false
+}}
+
+If the new memory largely overlaps with or complements the existing memories, merge them into an integrated memory and return a JSON object:
+•	“value”: The merged memory content
+•	“merged_from”: A list of IDs of the similar memories that were merged
+•	“should_merge”: true
+
+If the new memory is unique and should remain independent, return:
+{{
+"should_merge": false
+}}
+
+You must only return a valid JSON object in the final output, and no additional content (no natural language explanations, no extra fields).
+
+New memory:
+{new_memory}
+
+Similar existing memories:
+{similar_memories}
+
+Only return a valid JSON object, and do not include any other content.
+"""
+
+MEMORY_MERGE_PROMPT_ZH = """
+你是一个记忆整合专家。给定一个新记忆和相似的现有记忆，判断它们是否应该合并。
+
+在生成 value 之前，必须先完成以下判断步骤（在内在推理中完成，不需要输出）：
+1. 识别新记忆中包含的「事实单元」，例如：
+   - 身份信息类：名字、职业、居住地等
+   - 稳定偏好类：长期喜欢/不喜欢的事物、常去地点等
+   - 关系类：与某人的关系（朋友、同事、固定搭子等）
+   - 一次性事件/计划类：某天要参加的活动、本周末的临时安排等
+2. 对每个事实单元，判断：
+   - 哪些 existing memories 在表达“同一类事实”，
+   - 新记忆中对应的事实是否只是对该事实的「重复确认」，而不是“新的事实内容”
+
+合并规则（生成 value 时必须遵守）：
+- 合并后的 value：
+  - 不要重复表达同一语义（同一事实只描述一次）
+  - 不要因为多次提及或不同时间而重复同一事实
+  - 除非时间本身改变了语义（例如“从不喜欢 → 现在开始喜欢”），否则不要保留具体时间信息
+- 如果新记忆中包含多个不同类型的事实（例如“名字 + 爱好 + 本周计划”）：
+  - 不要合并就好
+  - 不要把彼此无关的事实硬塞进同一个 value 中
+- 一次性事件/计划（如“本周末去滑雪”“周天参加聚会”）：
+  - 如果 existing memories 中没有与之直接相关、可互补的事件记忆，则视为独立记忆，不要与身份/长期偏好类记忆合并
+  - 不要因为它和某个长期偏好有关（例如喜欢滑雪），就把“临时计划”和“长期偏好”合在一个 value 里
+
+输出格式要求：
+- 你需要返回一个 JSON 对象。
+- 若发生了合并：
+  - "value": 合并后的记忆内容（只描述最终结论，保留所有「语义上独特」的信息，不重复）
+  - "merged_from": 被合并的相似记忆 ID 列表
+  - "should_merge": true
+- 若新记忆无法与现有记忆合并，返回：
+  - "should_merge": false
+
+示例：
+新记忆：
+用户的名字是Tom，用户喜欢滑雪，并计划周末去滑雪
+
+相似的现有记忆：
+xxxx-xxxx-xxxx-xxxx-01: 用户的名字是Tom
+xxxx-xxxx-xxxx-xxxx-10: 用户喜欢滑雪
+xxxx-xxxx-xxxx-xxxx-11: 用户住在海边
+
+应该的返回值：
+{{
+    "value": "用户的名字是Tom，用户喜欢滑雪",
+    "merged_from": ["xxxx-xxxx-xxxx-xxxx-01", "xxxx-xxxx-xxxx-xxxx-10"],
+    "should_merge": true
+}}
+
+新记忆：
+用户周天要参加一个聚会
+
+相似的现有记忆：
+xxxx-xxxx-xxxx-xxxx-01: 用户昨天读了一本书
+
+应该的返回值：
+{{
+    "should_merge": false
+}}
+
+如果新记忆与现有记忆大量重叠或互补，将它们合并为一个整合的记忆，并返回一个JSON对象：
+- "value": 合并后的记忆内容
+- "merged_from": 被合并的相似记忆ID列表
+- "should_merge": true
+
+如果新记忆是独特的，应该保持独立，返回：
+{{
+    "should_merge": false
+}}
+
+最终只返回有效的 JSON 对象，不要任何额外内容（不要自然语言解释、不要多余字段）。
+
+新记忆：
+{new_memory}
+
+相似的现有记忆：
+{similar_memories}
+
+只返回有效的JSON对象，不要其他内容。"""
+
 # Prompt mapping for specialized tasks (e.g., hallucination filtering)
 PROMPT_MAPPING = {
     "hallucination_filter": SIMPLE_STRUCT_HALLUCINATION_FILTER_PROMPT,
     "rewrite": SIMPLE_STRUCT_REWRITE_MEMORY_PROMPT,
     "rewrite_user_only": SIMPLE_STRUCT_REWRITE_MEMORY_USER_ONLY_PROMPT,
     "add_before_search": SIMPLE_STRUCT_ADD_BEFORE_SEARCH_PROMPT,
+    "memory_merge_en": MEMORY_MERGE_PROMPT_EN,
+    "memory_merge_zh": MEMORY_MERGE_PROMPT_ZH,
 }
