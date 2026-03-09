@@ -50,30 +50,42 @@
   <strong>🏆 Top-tier long-term memory + personalization</strong><br/>
   <strong>💰 Saves 35.24% memory tokens</strong><br/>
   <sub>LoCoMo 75.80 • LongMemEval +40.43% • PrefEval-10 +2568% • PersonaMem +40.75%</sub>
-  <a href="https://memos.openmem.net/">
+  <!-- <a href="https://memos.openmem.net/">
     <img src="https://statics.memtensor.com.cn/memos/github_api_free_banner.gif" alt="MemOS Free API Banner">
-  </a>
+  </a> -->
 
 </p>
   
 </div>
 
-Get Free API: [Try API](https://memos-dashboard.openmem.net/quickstart/?source=github)
+<!-- Get Free API: [Try API](https://memos-dashboard.openmem.net/quickstart/?source=github) -->
 
----
+<!-- --- -->
 
-<br>
+<!-- <br> -->
 
 ## 🦞 Enhanced OpenClaw with MemOS Plugin
+
 ![](https://cdn.memtensor.com.cn/img/1770612303123_mnaisk_compressed.png)
 
-- [**72% lower token usage**](https://x.com/MemOS_dev/status/2020854044583924111) – intelligent memory retrieval instead of loading full chat history
-- [**Multi-agent memory sharing**](https://x.com/MemOS_dev/status/2020538135487062094) – multi-instance agents share memory via same user_id. Automatic context handoff.  
+🦞 Your lobster now has a working memory system — choose **Cloud** or **Local** to get started.
 
-🦞 Your lobster now has a working memory system.
+### ☁️ Cloud Plugin — Hosted Memory Service
+
+- [**72% lower token usage**](https://x.com/MemOS_dev/status/2020854044583924111) — intelligent memory retrieval instead of loading full chat history
+- [**Multi-agent memory sharing**](https://x.com/MemOS_dev/status/2020538135487062094) — multi-instance agents share memory via same user_id, automatic context handoff
 
 Get your API key: [MemOS Dashboard](https://memos-dashboard.openmem.net/cn/login/)  
-Try it: Full tutorial → [MemOS-Cloud-OpenClaw-Plugin](https://github.com/MemTensor/MemOS-Cloud-OpenClaw-Plugin)
+Full tutorial → [MemOS-Cloud-OpenClaw-Plugin](https://github.com/MemTensor/MemOS-Cloud-OpenClaw-Plugin)
+
+### 🧠 Local Plugin — 100% On-Device Memory
+
+- **Zero cloud dependency** — all data stays on your machine, persistent local SQLite storage
+- **Hybrid search + task & skill evolution** — FTS5 + vector search, auto task summarization, reusable skills that self-upgrade
+- **Multi-agent collaboration + Memory Viewer** — memory isolation, skill sharing, full web dashboard with 7 management pages
+
+ 🌐 [Homepage](https://memos-claw.openmem.net) · 
+📖 [Documentation](https://memos-claw.openmem.net/docs/index.html) · 📦 [NPM](https://www.npmjs.com/package/@memtensor/memos-local-openclaw-plugin)
 
 ## 📌 MemOS: Memory Operating System for AI Agents
 
@@ -91,6 +103,9 @@ Try it: Full tutorial → [MemOS-Cloud-OpenClaw-Plugin](https://github.com/MemTe
 
 
 ### News
+
+- **2026-03-08** · 🦞 **MemOS OpenClaw Plugin — Cloud & Local**  
+  Official OpenClaw memory plugins launched. **Cloud Plugin**: hosted memory service with 72% lower token usage and multi-agent memory sharing ([MemOS-Cloud-OpenClaw-Plugin](https://github.com/MemTensor/MemOS-Cloud-OpenClaw-Plugin)). **Local Plugin** (`v1.0.0`): 100% on-device memory with persistent SQLite, hybrid search (FTS5 + vector), task summarization & skill evolution, multi-agent collaboration, and a full Memory Viewer dashboard.
 
 - **2025-12-24** · 🎉 **MemOS v2.0: Stardust (星尘) Release**  
   Comprehensive KB (doc/URL parsing + cross-project sharing), memory feedback & precise deletion, multi-modal memory (images/charts), tool memory for agent planning, Redis Streams scheduling + DB optimizations, streaming/non-streaming chat, MCP upgrade, and lightweight quick/full deployment.
@@ -345,7 +360,7 @@ url = {https://global-sci.com/article/91443/memory3-language-modeling-with-expli
 
 ## 🙌 Contributing
 
-We welcome contributions from the community! Please read our [contribution guidelines](https://memos-docs.openmem.net/contribution/overview) to get started.
+We welcome contributions from the community! Please read our [contribution guidelines](https://memos-docs.openmem.net/open_source/contribution/overview/) to get started.
 
 <br>
 
