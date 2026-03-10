@@ -303,13 +303,13 @@ async def main():
     # Initialize client
     if args.client == "openclaw":  # 测试openclaw原生接口
         client = OpenclawClient(
-            apikey="xxxx",
+            apikey="xxxx",  # ./.openclaw/openclaw.json下的gateway.auth.token
             baseurl="http://localhost:18789",
         )
         client_name = "openclaw"
     else:  # 测试memos+openclaw插件
         client = OpenclawMemOSClient(
-            apikey="xxxx",
+            apikey="xxxx",  # ./.openclaw/openclaw.json下的gateway.auth.token
             baseurl="http://localhost:18789",
         )
         client_name = "openclaw_memos"
