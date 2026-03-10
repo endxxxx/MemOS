@@ -301,16 +301,16 @@ async def main():
     print(f"Loaded {len(data)} users from LoCoMo dataset")
 
     # Initialize client
-    if args.client == "openclaw":
+    if args.client == "openclaw":  # 测试openclaw原生接口
         client = OpenclawClient(
-            apikey="bb8804823a5140e82324a5417545e42a85b023c95abe77b5",
-            baseurl="http://47.116.116.227:18789",
+            apikey="xxxx",
+            baseurl="http://localhost:18789",
         )
         client_name = "openclaw"
-    else:
+    else:  # 测试memos+openclaw插件
         client = OpenclawMemOSClient(
-            apikey="bb8804823a5140e82324a5417545e42a85b023c95abe77b5",
-            baseurl="http://47.116.195.3:18789",
+            apikey="bb8804823a5140e82324a541754542a85b023c95abe77b5",
+            baseurl="http://localhost:18789",
         )
         client_name = "openclaw_memos"
 
