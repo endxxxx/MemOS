@@ -26,22 +26,39 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 load_dotenv()
 
 
-def update_memos_plugin_and_restart(set_user_id=None, recall_enabled=None, add_enabled=None):
+def update_plugin_and_restart(client_type, set_user_id=None, recall_enabled=None, add_enabled=None):
     """
-    Update memos-openclaw-plugin configuration and restart the gateway so settings take effect.
+    Update plugin configuration and restart the gateway so settings take effect.
     """
-    base = "openclaw config set plugins.entries.memos-cloud-openclaw-plugin.config"
+    if str(client_type).lower() not in ["memos", "openviking"]:
+        raise Exception(f"unknown client type: {client_type}")
+    base = "openclaw config set plugins.entries"
     cmds = []
     if set_user_id is not None:
-        cmds.append(f"{base}.userId '{set_user_id}'")
+        assert (
+            str(client_type).lower() == "memos"
+        )  # only memos-cloud-openclaw-plugin has this configuration
+        cmds.append(f"{base}.memos-cloud-openclaw-plugin.config.userId '{set_user_id}'")
     if recall_enabled is not None:
-        cmds.append(f"{base}.recallEnabled {str(recall_enabled).lower()}")
+        if client_type == "memos":
+            cmds.append(
+                f"{base}.memos-cloud-openclaw-plugin.config.recallEnabled {str(recall_enabled).lower()}"
+            )
+        else:
+            cmds.append(f"{base}.openviking.config.autoRecall {str(recall_enabled).lower()}")
     if add_enabled is not None:
-        cmds.append(f"{base}.addEnabled {str(add_enabled).lower()}")
+        if client_type == "memos":
+            cmds.append(
+                f"{base}.memos-cloud-openclaw-plugin.config.addEnabled {str(add_enabled).lower()}"
+            )
+        else:
+            cmds.append(f"{base}.openviking.config.autoCapture {str(add_enabled).lower()}")
+    # after updating config, restart the gateway
+    cmds.append("openclaw gateway restart")
     for c in cmds:
         subprocess.run(c, shell=True, check=True)
     if cmds:
-        print(f"Updated memos-cloud-openclaw-plugin config: {', '.join(cmds)}")
+        print(f"Updated plugin config: {', '.join(cmds)}")
     time.sleep(10)
 
 
@@ -155,14 +172,14 @@ def _load_json(path, default=None):
 
 
 async def evaluate_client(
-    client, data, oai_client, num_runs=3, batch_size=10, resume=True, version="default"
+    client_type, client, data, oai_client, num_runs=3, batch_size=10, resume=True, version="default"
 ):
     """
     Evaluate a client on the LoCoMo dataset.
     When resume=True (default), loads existing response/judged checkpoints and skips completed users.
     """
 
-    results_dir = f"results/locomo/{version}"
+    results_dir = f"results/locomo/{client_type}-{version}"
     os.makedirs(results_dir, exist_ok=True)
 
     response_path = f"{results_dir}/locomo_responses.json"
@@ -184,14 +201,15 @@ async def evaluate_client(
             continue
 
         # Sync memos_openclaw_plugin userId and restart gateway
-        update_memos_plugin_and_restart(set_user_id=user_id)
+        if client_type == "memos":
+            update_plugin_and_restart(client_type, set_user_id=user_id)
 
         user_responses = []
 
         print(f"Processing user {user_id}...")
 
         # Step 1: Add conversation to memory (enable add, disable recall)
-        update_memos_plugin_and_restart(add_enabled=True, recall_enabled=False)
+        update_plugin_and_restart(client_type, add_enabled=True, recall_enabled=False)
         conversation = user_data.get("conversation", {})
         messages = process_conversation(conversation)
 
@@ -217,7 +235,7 @@ async def evaluate_client(
         time.sleep(60)  # Add delay to avoid rate limiting
 
         # Step 2: Process each QA pair in parallel (disable add, enable recall)
-        update_memos_plugin_and_restart(add_enabled=False, recall_enabled=True)
+        update_plugin_and_restart(client_type, add_enabled=False, recall_enabled=True)
         qa_pairs = user_data.get("qa", [])
         print(f"Processing {len(qa_pairs)} QA pairs for {user_id}...current time: {datetime.now()}")
 
@@ -344,6 +362,13 @@ async def evaluate_client(
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--client_type",
+        type=str,
+        choices=["openclaw", "memos", "openviking"],
+        default="openclaw",
+        help="The type of client to evaluate",
+    )
+    parser.add_argument(
         "--num_runs",
         type=int,
         default=3,
@@ -390,6 +415,7 @@ async def main():
 
     # Run evaluation (from scratch if --no_resume is set, else resume from checkpoint)
     await evaluate_client(
+        args.client_type,
         client,
         data,
         oai_client,
