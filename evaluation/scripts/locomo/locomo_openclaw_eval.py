@@ -2,12 +2,14 @@ import argparse
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import time
 
 from datetime import datetime
 
 from dotenv import load_dotenv
+from openai import AsyncOpenAI
 from tqdm import tqdm
 
 from evaluation.scripts.locomo.locomo_eval import (
@@ -15,13 +17,32 @@ from evaluation.scripts.locomo.locomo_eval import (
     convert_numpy_types,
     locomo_grader,
 )
-from evaluation.scripts.utils.client import OpenclawClient, OpenclawMemOSClient
+from evaluation.scripts.utils.client import OpenclawClient
 
 
 # Add the project root to the path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 load_dotenv()
+
+
+def update_memos_plugin_and_restart(set_user_id=None, recall_enabled=None, add_enabled=None):
+    """
+    Update memos-openclaw-plugin configuration and restart the gateway so settings take effect.
+    """
+    base = "openclaw config set plugins.entries.memos-cloud-openclaw-plugin.config"
+    cmds = []
+    if set_user_id is not None:
+        cmds.append(f"{base}.userId '{set_user_id}'")
+    if recall_enabled is not None:
+        cmds.append(f"{base}.recallEnabled {str(recall_enabled).lower()}")
+    if add_enabled is not None:
+        cmds.append(f"{base}.addEnabled {str(add_enabled).lower()}")
+    for c in cmds:
+        subprocess.run(c, shell=True, check=True)
+    if cmds:
+        print(f"Updated memos-cloud-openclaw-plugin config: {', '.join(cmds)}")
+    time.sleep(10)
 
 
 def parse_datetime(date_time_str):
@@ -113,28 +134,64 @@ async def process_qa_pair(client, qa, user_id, loop):
         return None
 
 
-async def evaluate_client(client_name, client, data, oai_client, num_runs=3):
-    """
-    Evaluate a client on the LoCoMo dataset
-    """
-    print(f"\n=== Evaluating {client_name} ===")
+def _save_json(path, data):
+    """Save data to JSON file (for checkpoint)."""
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
 
-    results_dir = f"results/locomo/{client_name}"
+
+def _load_json(path, default=None):
+    """Load JSON from file if exists, else return default."""
+    if default is None:
+        default = {}
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"Warning: could not load checkpoint {path}: {e}, starting fresh")
+        return default
+
+
+async def evaluate_client(
+    client, data, oai_client, num_runs=3, batch_size=10, resume=True, version="default"
+):
+    """
+    Evaluate a client on the LoCoMo dataset.
+    When resume=True (default), loads existing response/judged checkpoints and skips completed users.
+    """
+
+    results_dir = f"results/locomo/{version}"
     os.makedirs(results_dir, exist_ok=True)
 
-    response_path = f"{results_dir}/{client_name}_locomo_responses.json"
-    judged_path = f"{results_dir}/{client_name}_locomo_judged.json"
+    response_path = f"{results_dir}/locomo_responses.json"
+    judged_path = f"{results_dir}/locomo_judged.json"
 
-    responses = {}
+    # Resume: load existing responses, only process users not yet completed
+    responses = _load_json(response_path) if resume else {}
+    completed_user_ids = set(responses.keys())
+    if completed_user_ids:
+        print(
+            f"Resume: found checkpoint with {len(completed_user_ids)} users, skipping them in response phase"
+        )
 
     # Process each user's data
     for user_idx, user_data in enumerate(data):
         user_id = f"locomo_exp_user_{user_idx}"
+        if user_id in completed_user_ids:
+            print(f"Skipping user {user_id} (already in checkpoint)")
+            continue
+
+        # Sync memos_openclaw_plugin userId and restart gateway
+        update_memos_plugin_and_restart(set_user_id=user_id)
+
         user_responses = []
 
         print(f"Processing user {user_id}...")
 
-        # Step 1: Add conversation to memory
+        # Step 1: Add conversation to memory (enable add, disable recall)
+        update_memos_plugin_and_restart(add_enabled=True, recall_enabled=False)
         conversation = user_data.get("conversation", {})
         messages = process_conversation(conversation)
 
@@ -150,7 +207,7 @@ async def evaluate_client(client_name, client, data, oai_client, num_runs=3):
             timestamp = messages[0]["timestamp"] if messages else time.time()
 
             # Add messages to memory
-            client.add(messages, user_id, timestamp)
+            client.add(messages, user_id, timestamp, batch_size)
             add_duration = time.time() - start_time
             print(f"Added messages in {add_duration:.2f} seconds")
         except Exception as e:
@@ -159,7 +216,8 @@ async def evaluate_client(client_name, client, data, oai_client, num_runs=3):
 
         time.sleep(60)  # Add delay to avoid rate limiting
 
-        # Step 2: Process each QA pair in parallel
+        # Step 2: Process each QA pair in parallel (disable add, enable recall)
+        update_memos_plugin_and_restart(add_enabled=False, recall_enabled=True)
         qa_pairs = user_data.get("qa", [])
         print(f"Processing {len(qa_pairs)} QA pairs for {user_id}...current time: {datetime.now()}")
 
@@ -191,20 +249,32 @@ async def evaluate_client(client_name, client, data, oai_client, num_runs=3):
         user_responses = completed_responses
         responses[user_id] = user_responses
 
-    # Save responses
-    with open(response_path, "w") as f:
-        json.dump(responses, f, indent=2)
+        # Checkpoint: save after each user's QA completes
+        _save_json(response_path, responses)
+        print(f"Checkpoint: saved responses (user {user_id}) to {response_path}")
+
+    # If checkpoint was not used or all runs finished, write again here for consistency
+    _save_json(response_path, responses)
     print(f"Saved responses to {response_path}")
 
     # Step 3: Evaluate responses
     print("\n=== Evaluating responses ===")
 
-    all_grades = {}
+    # Resume: load existing grading results, only grade users not yet scored
+    all_grades = _load_json(judged_path) if resume else {}
+    graded_user_ids = set(all_grades.keys())
+    if graded_user_ids:
+        print(
+            f"Resume: found judged checkpoint with {len(graded_user_ids)} users, skipping them in grading phase"
+        )
 
     for user_id, user_responses in responses.items():
+        if user_id in graded_user_ids:
+            print(f"Skipping grading for {user_id} (already in judged checkpoint)")
+            continue
         graded_responses = []
 
-        semaphore = asyncio.Semaphore(30)  # 并发限制为30
+        semaphore = asyncio.Semaphore(30)  # Concurrency limit: 30
 
         async def grade_with_semaphore(response, semaphore=semaphore):
             async with semaphore:
@@ -217,7 +287,7 @@ async def evaluate_client(client_name, client, data, oai_client, num_runs=3):
                 if not ground_truth:
                     return None
 
-                # 并行评分任务
+                # Parallel grading tasks
                 grading_tasks = [
                     locomo_grader(oai_client, question, ground_truth, answer)
                     for _ in range(num_runs)
@@ -225,7 +295,7 @@ async def evaluate_client(client_name, client, data, oai_client, num_runs=3):
                 judgments = await asyncio.gather(*grading_tasks)
                 judgments_dict = {f"judgment_{i + 1}": j for i, j in enumerate(judgments)}
 
-                # 计算 NLP 指标
+                # Compute NLP metrics
                 nlp_metrics = calculate_nlp_metrics(
                     ground_truth, answer, "", ["lexical", "semantic"]
                 )
@@ -241,10 +311,10 @@ async def evaluate_client(client_name, client, data, oai_client, num_runs=3):
                     "total_duration_ms": search_duration_ms,
                 }
 
-        # 创建所有评分任务
+        # Create all grading tasks
         grade_tasks = [grade_with_semaphore(response) for response in user_responses]
 
-        # 使用 tqdm 显示进度
+        # Show progress with tqdm
         for future in tqdm(
             asyncio.as_completed(grade_tasks),
             total=len(grade_tasks),
@@ -256,6 +326,11 @@ async def evaluate_client(client_name, client, data, oai_client, num_runs=3):
                 graded_responses.append(graded)
 
         all_grades[user_id] = graded_responses
+
+        # Checkpoint: save after each user's grading completes (convert numpy types before save, same as final format)
+        to_save = convert_numpy_types(all_grades)
+        _save_json(judged_path, to_save)
+        print(f"Checkpoint: saved judged (user {user_id}) to {judged_path}")
 
     # Save judged results
     all_grades = convert_numpy_types(all_grades)
@@ -269,25 +344,32 @@ async def evaluate_client(client_name, client, data, oai_client, num_runs=3):
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--client",
-        type=str,
-        choices=["openclaw", "openclaw_memos"],
-        default="openclaw_memos",
-        help="Which client to evaluate",
-    )
-    parser.add_argument(
         "--num_runs",
         type=int,
         default=3,
         help="Number of times to run the LLM grader for each question",
     )
+    parser.add_argument(
+        "--version",
+        type=str,
+        default="default",
+        help="Version of the evaluation",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=10,
+        help="The number of messages to add to memory at once",
+    )
+    parser.add_argument(
+        "--no_resume",
+        action="store_true",
+        help="Disable checkpoint resume; start evaluation from scratch (ignore existing response/judged files)",
+    )
     args = parser.parse_args()
 
     # Load environment variables
     load_dotenv()
-
-    # Initialize OpenAI client for grading
-    from openai import AsyncOpenAI
 
     oai_client = AsyncOpenAI(
         api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL")
@@ -301,21 +383,21 @@ async def main():
     print(f"Loaded {len(data)} users from LoCoMo dataset")
 
     # Initialize client
-    if args.client == "openclaw":  # 测试openclaw原生接口
-        client = OpenclawClient(
-            apikey="xxxx",  # ./.openclaw/openclaw.json下的gateway.auth.token
-            baseurl="http://localhost:18789",
-        )
-        client_name = "openclaw"
-    else:  # 测试memos+openclaw插件
-        client = OpenclawMemOSClient(
-            apikey="xxxx",  # ./.openclaw/openclaw.json下的gateway.auth.token
-            baseurl="http://localhost:18789",
-        )
-        client_name = "openclaw_memos"
+    client = OpenclawClient(
+        apikey="xxxx",  # gateway.auth.token in .openclaw/openclaw.json
+        baseurl="http://localhost:18789",
+    )
 
-    # Run evaluation
-    await evaluate_client(client_name, client, data, oai_client, args.num_runs)
+    # Run evaluation (from scratch if --no_resume is set, else resume from checkpoint)
+    await evaluate_client(
+        client,
+        data,
+        oai_client,
+        args.num_runs,
+        args.batch_size,
+        resume=not args.no_resume,
+        version=args.version,
+    )
 
     print("\n=== Evaluation Complete ===")
 

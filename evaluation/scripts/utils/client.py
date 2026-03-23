@@ -139,80 +139,13 @@ class OpenclawClient:
                     continue
 
     def search(self, query, user_id, top_k):
-        concat_search_query = (
-            f"You need to answer the following query based on your memory:\n{query}"
-        )
         max_retries = 5
         for attempt in range(max_retries):
             try:
                 payload = {
                     "model": "openclaw",
-                    "messages": [{"role": "user", "content": concat_search_query}],
+                    "messages": [{"role": "user", "content": query}],
                 }
-                response = requests.post(
-                    f"{self.baseurl}/v1/chat/completions",
-                    headers=self.header,
-                    json=payload,
-                )
-                response.raise_for_status()
-                return response.json()
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    time.sleep(2**attempt)
-                else:
-                    raise e
-
-
-class OpenclawMemOSClient:
-    def __init__(self, apikey: str, baseurl: str, agent_id: str = "main"):
-        self.apikey = apikey
-        self.baseurl = baseurl
-        self.agent_id = agent_id
-        self.header = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.apikey}",
-            "x-openclaw-agent-id": self.agent_id,
-        }
-
-    def add(self, messages, user_id, timestamp, batch_size=2):
-        def process_batch(batch_messages):
-            concat_add_query = ""
-            for msg in batch_messages:
-                concat_add_query += f"{msg.get('role')}: {msg.get('content')}\n"
-            max_retries = 5
-            for attempt in range(max_retries):
-                try:
-                    payload = {
-                        "model": "openclaw",
-                        "messages": [{"role": "user", "content": concat_add_query}],
-                    }
-                    response = requests.post(
-                        f"{self.baseurl}/v1/chat/completions",
-                        headers=self.header,
-                        json=payload,
-                    )
-                    response.raise_for_status()
-                    break
-                except Exception as e:
-                    if attempt < max_retries - 1:
-                        time.sleep(2**attempt)
-                    else:
-                        raise e
-
-        batches = [messages[i : i + batch_size] for i in range(0, len(messages), batch_size)]
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            futures = {executor.submit(process_batch, batch): batch for batch in batches}
-            for future in tqdm(as_completed(futures), total=len(futures)):
-                try:
-                    future.result()
-                except Exception:
-                    continue
-
-    def search(self, query, user_id, top_k):
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                payload = {"model": "openclaw", "messages": [{"role": "user", "content": query}]}
                 response = requests.post(
                     f"{self.baseurl}/v1/chat/completions",
                     headers=self.header,
