@@ -30,8 +30,12 @@ def update_plugin_and_restart(client_type, set_user_id=None, recall_enabled=None
     """
     Update plugin configuration and restart the gateway so settings take effect.
     """
+    if str(client_type).lower() == "openclaw":
+        print("evaluating openclaw client, no need for plugin config update")
+        return
     if str(client_type).lower() not in ["memos", "openviking"]:
-        raise Exception(f"unknown client type: {client_type}")
+        print(f"Warning: unknown client type: {client_type}, leaving all config as is")
+        return
     base = "openclaw config set plugins.entries"
     cmds = []
     if set_user_id is not None:
@@ -53,10 +57,10 @@ def update_plugin_and_restart(client_type, set_user_id=None, recall_enabled=None
             )
         else:
             cmds.append(f"{base}.openviking.config.autoCapture {str(add_enabled).lower()}")
-    # after updating config, restart the gateway
-    cmds.append("openclaw gateway restart")
     for c in cmds:
         subprocess.run(c, shell=True, check=True)
+    # after updating config, restart the gateway
+    subprocess.run("openclaw gateway restart", shell=True, check=True)
     if cmds:
         print(f"Updated plugin config: {', '.join(cmds)}")
     time.sleep(10)
@@ -364,7 +368,7 @@ async def main():
     parser.add_argument(
         "--client_type",
         type=str,
-        choices=["openclaw", "memos", "openviking"],
+        choices=["openclaw", "memos", "openviking", "mem9"],
         default="openclaw",
         help="The type of client to evaluate",
     )
@@ -409,8 +413,8 @@ async def main():
 
     # Initialize client
     client = OpenclawClient(
-        apikey="xxxx",  # gateway.auth.token in .openclaw/openclaw.json
-        baseurl="http://localhost:18789",
+        apikey=os.getenv("OPENCLAW_API_KEY"),  # gateway.auth.token in .openclaw/openclaw.json
+        baseurl=os.getenv("OPENCLAW_BASE_URL"),
     )
 
     # Run evaluation (from scratch if --no_resume is set, else resume from checkpoint)
