@@ -23,6 +23,11 @@ function phase(n, title) {
 }
 
 const pluginDir = path.resolve(__dirname, "..");
+const npmCmd = process.platform === "win32" ? "npm.cmd" : "npm";
+
+function normalizePathForMatch(p) {
+  return path.resolve(p).replace(/^\\\\\?\\/, "").replace(/\\/g, "/").toLowerCase();
+}
 
 console.log(`
 ${CYAN}${BOLD}┌──────────────────────────────────────────────────┐
@@ -34,13 +39,86 @@ log(`Plugin dir: ${DIM}${pluginDir}${RESET}`);
 log(`Node: ${process.version}  Platform: ${process.platform}-${process.arch}`);
 
 /* ═══════════════════════════════════════════════════════════
+ *  Pre-phase: Clean stale build artifacts on upgrade
+ *  When openclaw re-installs a new version over an existing
+ *  extensions dir, old dist/node_modules can conflict.
+ *  We nuke them so npm install gets a clean slate, but
+ *  preserve user data (.env, data/).
+ * ═══════════════════════════════════════════════════════════ */
+
+function cleanStaleArtifacts() {
+  const pluginDirNorm = normalizePathForMatch(pluginDir);
+  const isExtensionsDir = pluginDirNorm.includes("/.openclaw/extensions/");
+  if (!isExtensionsDir) return;
+
+  const pkgPath = path.join(pluginDir, "package.json");
+  if (!fs.existsSync(pkgPath)) return;
+
+  let installedVer = "unknown";
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    installedVer = pkg.version || "unknown";
+  } catch { /* ignore */ }
+
+  const markerPath = path.join(pluginDir, ".installed-version");
+  let prevVer = "";
+  try { prevVer = fs.readFileSync(markerPath, "utf-8").trim(); } catch { /* first install */ }
+
+  if (prevVer === installedVer) {
+    log(`Version unchanged (${installedVer}), skipping artifact cleanup.`);
+    return;
+  }
+
+  if (prevVer) {
+    log(`Upgrade detected: ${DIM}${prevVer}${RESET} → ${GREEN}${installedVer}${RESET}`);
+  } else {
+    log(`Fresh install: ${GREEN}${installedVer}${RESET}`);
+  }
+
+  const dirsToClean = ["dist", "node_modules"];
+  let cleaned = 0;
+  for (const dir of dirsToClean) {
+    const full = path.join(pluginDir, dir);
+    if (fs.existsSync(full)) {
+      try {
+        fs.rmSync(full, { recursive: true, force: true });
+        ok(`Cleaned stale ${dir}/`);
+        cleaned++;
+      } catch (e) {
+        warn(`Could not remove ${dir}/: ${e.message}`);
+      }
+    }
+  }
+
+  const filesToClean = ["package-lock.json"];
+  for (const f of filesToClean) {
+    const full = path.join(pluginDir, f);
+    if (fs.existsSync(full)) {
+      try { fs.unlinkSync(full); ok(`Removed stale ${f}`); cleaned++; } catch { /* ignore */ }
+    }
+  }
+
+  try { fs.writeFileSync(markerPath, installedVer + "\n", "utf-8"); } catch { /* ignore */ }
+
+  if (cleaned > 0) {
+    ok(`Cleaned ${cleaned} stale artifact(s). Fresh install will follow.`);
+  }
+}
+
+try {
+  cleanStaleArtifacts();
+} catch (e) {
+  warn(`Artifact cleanup error: ${e.message}`);
+}
+
+/* ═══════════════════════════════════════════════════════════
  *  Phase 0: Ensure all dependencies are installed
  * ═══════════════════════════════════════════════════════════ */
 
 function ensureDependencies() {
   phase(0, "检测核心依赖 / Check core dependencies");
 
-  const coreDeps = ["@sinclair/typebox", "uuid", "posthog-node", "@huggingface/transformers"];
+  const coreDeps = ["@sinclair/typebox", "uuid", "@huggingface/transformers"];
   const missing = [];
   for (const dep of coreDeps) {
     try {
@@ -61,10 +139,10 @@ function ensureDependencies() {
   log("Running: npm install --omit=dev ...");
 
   const startMs = Date.now();
-  const result = spawnSync("npm", ["install", "--omit=dev"], {
+  const result = spawnSync(npmCmd, ["install", "--omit=dev"], {
     cwd: pluginDir,
     stdio: "pipe",
-    shell: true,
+    shell: false,
     timeout: 120_000,
   });
   const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
@@ -102,6 +180,7 @@ function cleanupLegacy() {
   if (!fs.existsSync(extDir)) { log("No extensions directory found, skipping."); return; }
 
   const legacyDirs = [
+    path.join(extDir, "memos-local"),
     path.join(extDir, "memos-lite"),
     path.join(extDir, "memos-lite-openclaw-plugin"),
     path.join(extDir, "node_modules", "@memtensor", "memos-lite-openclaw-plugin"),
@@ -127,7 +206,7 @@ function cleanupLegacy() {
       const cfg = JSON.parse(raw);
       const entries = cfg?.plugins?.entries;
       if (entries) {
-        const oldKeys = ["memos-lite", "memos-lite-openclaw-plugin"];
+        const oldKeys = ["memos-local", "memos-lite", "memos-lite-openclaw-plugin"];
         let cfgChanged = false;
 
         for (const oldKey of oldKeys) {
@@ -146,14 +225,26 @@ function cleanupLegacy() {
         const newEntry = entries["memos-local-openclaw-plugin"];
         if (newEntry && typeof newEntry.source === "string") {
           const oldSource = newEntry.source;
-          if (oldSource.includes("memos-lite")) {
+          if (oldSource.includes("memos-lite") || (oldSource.includes("memos-local") && !oldSource.includes("memos-local-openclaw-plugin"))) {
             newEntry.source = oldSource
               .replace(/memos-lite-openclaw-plugin/g, "memos-local-openclaw-plugin")
-              .replace(/memos-lite/g, "memos-local");
+              .replace(/memos-lite/g, "memos-local-openclaw-plugin")
+              .replace(/[\\/]memos-local[\\/]/g, `${path.sep}memos-local-openclaw-plugin${path.sep}`)
+              .replace(/[\\/]memos-local$/g, `${path.sep}memos-local-openclaw-plugin`);
             if (newEntry.source !== oldSource) {
               log(`Updated source path: ${DIM}${oldSource}${RESET} → ${GREEN}${newEntry.source}${RESET}`);
               cfgChanged = true;
             }
+          }
+        }
+
+        const slots = cfg?.plugins?.slots;
+        if (slots && typeof slots.memory === "string") {
+          const oldSlotNames = ["memos-local", "memos-lite", "memos-lite-openclaw-plugin"];
+          if (oldSlotNames.includes(slots.memory)) {
+            log(`Migrated plugins.slots.memory: ${DIM}${slots.memory}${RESET} → ${GREEN}memos-local-openclaw-plugin${RESET}`);
+            slots.memory = "memos-local-openclaw-plugin";
+            cfgChanged = true;
           }
         }
 
@@ -185,10 +276,77 @@ try {
 }
 
 /* ═══════════════════════════════════════════════════════════
- *  Phase 2: Verify better-sqlite3 native module
+ *  Phase 2: Install bundled skill (memos-memory-guide)
  * ═══════════════════════════════════════════════════════════ */
 
-phase(2, "检查 better-sqlite3 原生模块 / Check native module");
+function installBundledSkill() {
+  phase(2, "安装记忆技能 / Install memory skill");
+
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  if (!home) { warn("Cannot determine HOME directory, skipping skill install."); return; }
+
+  const skillSrc = path.join(pluginDir, "skill", "memos-memory-guide", "SKILL.md");
+  if (!fs.existsSync(skillSrc)) {
+    warn("Bundled SKILL.md not found, skipping skill install.");
+    return;
+  }
+
+  let pluginVersion = "0.0.0";
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(pluginDir, "package.json"), "utf-8"));
+    pluginVersion = pkg.version || pluginVersion;
+  } catch { /* ignore */ }
+
+  const skillContent = fs.readFileSync(skillSrc, "utf-8");
+  const targets = [
+    path.join(home, ".openclaw", "workspace", "skills", "memos-memory-guide"),
+    path.join(home, ".openclaw", "skills", "memos-memory-guide"),
+  ];
+
+  const meta = JSON.stringify({ ownerId: "memos-local-openclaw-plugin", slug: "memos-memory-guide", version: pluginVersion, publishedAt: Date.now() });
+  const origin = JSON.stringify({ version: 1, registry: "memos-local-openclaw-plugin", slug: "memos-memory-guide", installedVersion: pluginVersion, installedAt: Date.now() });
+
+  for (const dest of targets) {
+    try {
+      fs.mkdirSync(dest, { recursive: true });
+      fs.writeFileSync(path.join(dest, "SKILL.md"), skillContent, "utf-8");
+      fs.writeFileSync(path.join(dest, "_meta.json"), meta, "utf-8");
+      const clawHubDir = path.join(dest, ".clawhub");
+      fs.mkdirSync(clawHubDir, { recursive: true });
+      fs.writeFileSync(path.join(clawHubDir, "origin.json"), origin, "utf-8");
+      ok(`Skill installed → ${DIM}${dest}${RESET}`);
+    } catch (e) {
+      warn(`Could not install skill to ${dest}: ${e.message}`);
+    }
+  }
+
+  // Register in skills-lock.json so OpenClaw Dashboard can discover it
+  const lockPath = path.join(home, ".openclaw", "workspace", "skills-lock.json");
+  try {
+    let lockData = { version: 1, skills: {} };
+    if (fs.existsSync(lockPath)) {
+      lockData = JSON.parse(fs.readFileSync(lockPath, "utf-8"));
+    }
+    if (!lockData.skills) lockData.skills = {};
+    lockData.skills["memos-memory-guide"] = { source: "memos-local-openclaw-plugin", sourceType: "plugin", computedHash: "" };
+    fs.writeFileSync(lockPath, JSON.stringify(lockData, null, 2) + "\n", "utf-8");
+    ok("Registered in skills-lock.json");
+  } catch (e) {
+    warn(`Could not update skills-lock.json: ${e.message}`);
+  }
+}
+
+try {
+  installBundledSkill();
+} catch (e) {
+  warn(`Skill install error: ${e.message}`);
+}
+
+/* ═══════════════════════════════════════════════════════════
+ *  Phase 3: Verify better-sqlite3 native module
+ * ═══════════════════════════════════════════════════════════ */
+
+phase(3, "检查 better-sqlite3 原生模块 / Check native module");
 
 const sqliteModulePath = path.join(pluginDir, "node_modules", "better-sqlite3");
 
@@ -228,15 +386,6 @@ function sqliteBindingsExist() {
 
 if (sqliteBindingsExist()) {
   ok("better-sqlite3 is ready.");
-  console.log(`
-${GREEN}${BOLD}  ┌──────────────────────────────────────────────────┐
-  │  ✔ Setup complete!                                │
-  │                                                    │
-  │  Restart gateway:                                  │
-  │  ${CYAN}openclaw gateway stop && openclaw gateway start${GREEN}  │
-  └──────────────────────────────────────────────────┘${RESET}
-`);
-  process.exit(0);
 } else {
   warn("better-sqlite3 native bindings not found in plugin dir.");
   log(`Searched in: ${DIM}${sqliteModulePath}/build/${RESET}`);
@@ -245,41 +394,32 @@ ${GREEN}${BOLD}  ┌────────────────────
 
 const startMs = Date.now();
 
-const result = spawnSync("npm", ["rebuild", "better-sqlite3"], {
+const result = spawnSync(npmCmd, ["rebuild", "better-sqlite3"], {
   cwd: pluginDir,
   stdio: "pipe",
-  shell: true,
+  shell: false,
   timeout: 180_000,
 });
 
-const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
-const stdout = (result.stdout || "").toString().trim();
-const stderr = (result.stderr || "").toString().trim();
+  const startMs = Date.now();
+  const result = spawnSync("npm", ["rebuild", "better-sqlite3"], {
+    cwd: pluginDir,
+    stdio: "pipe",
+    shell: true,
+    timeout: 180_000,
+  });
+  const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
+  const stdout = (result.stdout || "").toString().trim();
+  const stderr = (result.stderr || "").toString().trim();
+  if (stdout) log(`rebuild output: ${DIM}${stdout.slice(0, 500)}${RESET}`);
+  if (stderr) warn(`rebuild stderr: ${DIM}${stderr.slice(0, 500)}${RESET}`);
 
-if (stdout) log(`rebuild output: ${DIM}${stdout.slice(0, 500)}${RESET}`);
-if (stderr) warn(`rebuild stderr: ${DIM}${stderr.slice(0, 500)}${RESET}`);
-
-if (result.status === 0) {
-  if (sqliteBindingsExist()) {
+  if (result.status === 0 && sqliteBindingsExist()) {
     ok(`better-sqlite3 rebuilt successfully (${elapsed}s).`);
-    console.log(`
-${GREEN}${BOLD}  ┌──────────────────────────────────────────────────┐
-  │  ✔ Setup complete!                                │
-  │                                                    │
-  │  Restart gateway:                                  │
-  │  ${CYAN}openclaw gateway stop && openclaw gateway start${GREEN}  │
-  └──────────────────────────────────────────────────┘${RESET}
-`);
-    process.exit(0);
   } else {
-    fail(`Rebuild completed but bindings still missing (${elapsed}s).`);
-    fail(`Looked in: ${sqliteModulePath}/build/`);
-  }
-} else {
-  fail(`Rebuild failed with exit code ${result.status} (${elapsed}s).`);
-}
-
-console.log(`
+    if (result.status !== 0) fail(`Rebuild failed with exit code ${result.status} (${elapsed}s).`);
+    else { fail(`Rebuild completed but bindings still missing (${elapsed}s).`); fail(`Looked in: ${sqliteModulePath}/build/`); }
+    console.log(`
 ${YELLOW}${BOLD}  ╔══════════════════════════════════════════════════════════════╗
   ║  ✖ better-sqlite3 native module build failed               ║
   ╠══════════════════════════════════════════════════════════════╣${RESET}
@@ -300,5 +440,270 @@ ${YELLOW}  ║${RESET}  ${GREEN}openclaw gateway stop && openclaw gateway start$
 ${YELLOW}  ║${RESET}                                                             ${YELLOW}║${RESET}
 ${YELLOW}${BOLD}  ╚══════════════════════════════════════════════════════════════╝${RESET}
 `);
+  }
+}
 
-process.exit(0);
+/* ═══════════════════════════════════════════════════════════
+ *  Phase 3: Interactive LAN Sharing Setup
+ * ═══════════════════════════════════════════════════════════ */
+
+const rlMod = require("readline");
+const os = require("os");
+const crypto = require("crypto");
+
+function getLocalIPs() {
+  const nets = os.networkInterfaces();
+  const results = [];
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      if (net.family === "IPv4" && !net.internal) {
+        results.push({ name, address: net.address });
+      }
+    }
+  }
+  return results;
+}
+
+function generateTeamToken() {
+  return crypto.randomBytes(18).toString("base64url");
+}
+
+function createPrompt() {
+  const rl = rlMod.createInterface({ input: process.stdin, output: process.stdout });
+  return {
+    ask(q) { return new Promise((resolve) => rl.question(q, (a) => resolve(a.trim()))); },
+    close() { rl.close(); },
+  };
+}
+
+async function setupSharingWizard() {
+  if (!process.stdin.isTTY) {
+    log("Non-interactive environment, skipping sharing setup wizard.");
+    return;
+  }
+  if (process.env.MEMOS_SKIP_SETUP === "1") {
+    log("MEMOS_SKIP_SETUP=1, skipping sharing setup.");
+    return;
+  }
+
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  const cfgPath = path.join(home, ".openclaw", "openclaw.json");
+  if (!fs.existsSync(cfgPath)) {
+    log("~/.openclaw/openclaw.json not found, skipping sharing setup.");
+    return;
+  }
+
+  let cfg;
+  try {
+    cfg = JSON.parse(fs.readFileSync(cfgPath, "utf-8"));
+  } catch (e) {
+    warn(`Cannot parse openclaw.json: ${e.message}`);
+    return;
+  }
+
+  const pluginEntry = cfg?.plugins?.entries?.["memos-local-openclaw-plugin"];
+  const existingSharing = pluginEntry?.config?.sharing;
+
+  if (existingSharing?.enabled) {
+    const roleLabel = existingSharing.role === "hub" ? "Hub (团队中心)" : "Client (团队成员)";
+    log(`已检测到共享配置: 角色 = ${BOLD}${roleLabel}${RESET}`);
+    const prompt = createPrompt();
+    const ans = await prompt.ask(`  是否重新配置？/ Reconfigure? (y/N) > `);
+    prompt.close();
+    if (ans.toLowerCase() !== "y") {
+      ok("保留现有共享配置。");
+      return;
+    }
+  }
+
+  phase(3, "局域网共享设置 / LAN Sharing Setup");
+
+  const prompt = createPrompt();
+
+  const enableAns = await prompt.ask(`  是否启用局域网记忆共享？/ Enable LAN sharing? (y/N) > `);
+  if (enableAns.toLowerCase() !== "y") {
+    prompt.close();
+    log("未启用共享。你可以稍后在 openclaw.json 中手动配置。");
+    return;
+  }
+
+  console.log(`
+  ${BOLD}请选择你的角色 / Choose your role:${RESET}
+    ${GREEN}1)${RESET} 创建团队 (Hub)   — 成为团队管理员，其他人连接你
+    ${GREEN}2)${RESET} 加入团队 (Client) — 连接到已有的 Hub
+`);
+
+  const roleAns = await prompt.ask(`  请输入 1 或 2 / Enter 1 or 2 > `);
+
+  let sharingConfig;
+
+  if (roleAns === "1") {
+    console.log(`\n  ${CYAN}${BOLD}── Hub 设置 / Hub Setup ──${RESET}\n`);
+
+    const teamName = (await prompt.ask(`  团队名称 / Team name (默认: My Team) > `)) || "My Team";
+    const portStr = (await prompt.ask(`  Hub 端口 / Hub port (默认: 18800) > `)) || "18800";
+    const port = parseInt(portStr, 10) || 18800;
+    const teamToken = generateTeamToken();
+
+    sharingConfig = {
+      enabled: true,
+      role: "hub",
+      hub: { port, teamName, teamToken },
+    };
+
+    const localIPs = getLocalIPs();
+    const displayIP = localIPs.length > 0 ? localIPs[0].address : "<your-ip>";
+
+    console.log(`
+${GREEN}${BOLD}  ┌────────────────────────────────────────────────────────────┐
+  │  ✔ Hub 配置完成！/ Hub configured!                        │
+  │                                                            │
+  │  请将以下信息分享给团队成员:                                │
+  │  Share this info with your team:                           │
+  │                                                            │
+  │  ${CYAN}Hub 地址 / Address : ${displayIP}:${port}${GREEN}
+  │  ${CYAN}Team Token         : ${teamToken}${GREEN}
+  │                                                            │
+  │  团队成员安装插件时选择 "加入团队" 并输入以上信息。          │
+  └────────────────────────────────────────────────────────────┘${RESET}
+`);
+
+    if (localIPs.length > 1) {
+      log("检测到多个网络接口 / Multiple network interfaces:");
+      for (const ip of localIPs) {
+        log(`  ${ip.name}: ${BOLD}${ip.address}:${port}${RESET}`);
+      }
+    }
+
+  } else if (roleAns === "2") {
+    console.log(`\n  ${CYAN}${BOLD}── 加入团队 / Join Team ──${RESET}\n`);
+
+    const hubAddress = await prompt.ask(`  Hub 地址 / Hub address (如 192.168.1.100:18800) > `);
+    if (!hubAddress) {
+      prompt.close();
+      warn("Hub 地址不能为空，跳过配置。");
+      return;
+    }
+
+    const teamToken = await prompt.ask(`  Team Token (由 Hub 创建者提供 / from Hub creator) > `);
+    if (!teamToken) {
+      prompt.close();
+      warn("Team Token 不能为空，跳过配置。");
+      return;
+    }
+
+    const username = (await prompt.ask(`  你的用户名 / Your username (默认: ${os.userInfo().username}) > `)) || os.userInfo().username;
+
+    const hubUrl = /^https?:\/\//i.test(hubAddress.trim()) ? hubAddress.trim() : `http://${hubAddress.trim()}`;
+    log(`正在加入团队 / Joining team at: ${BOLD}${hubUrl}${RESET} ...`);
+
+    let userToken = "";
+    let joinOk = false;
+
+    try {
+      const http = require("http");
+      const https = require("https");
+      const joinResult = await new Promise((resolve, reject) => {
+        const postData = JSON.stringify({ teamToken, username, deviceName: os.hostname() });
+        const url = new URL(`${hubUrl}/api/v1/hub/join`);
+        const mod = url.protocol === "https:" ? https : http;
+        const reqObj = mod.request({
+          hostname: url.hostname, port: url.port, path: url.pathname,
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(postData) },
+          timeout: 8000,
+        }, (resp) => {
+          let data = "";
+          resp.on("data", (c) => { data += c; });
+          resp.on("end", () => {
+            try { resolve({ status: resp.statusCode, body: JSON.parse(data) }); }
+            catch { resolve({ status: resp.statusCode, body: data }); }
+          });
+        });
+        reqObj.on("error", reject);
+        reqObj.on("timeout", () => { reqObj.destroy(); reject(new Error("timeout")); });
+        reqObj.write(postData);
+        reqObj.end();
+      });
+
+      if (joinResult.status === 200 && joinResult.body.userToken) {
+        userToken = joinResult.body.userToken;
+        joinOk = true;
+        ok(`加入成功！/ Joined successfully! 用户: ${BOLD}${username}${RESET}`);
+      } else if (joinResult.status === 403) {
+        prompt.close();
+        fail("Team Token 无效 / Invalid Team Token");
+        return;
+      } else {
+        warn(`Hub 返回 / Hub responded: ${joinResult.status} ${JSON.stringify(joinResult.body)}`);
+        log("配置将被保存，gateway 启动时会用 Team Token 自动重试加入。");
+      }
+    } catch (e) {
+      warn(`无法连接 Hub / Cannot reach Hub: ${e.message}`);
+      log("配置将被保存，gateway 启动时会用 Team Token 自动重试加入。");
+    }
+
+    sharingConfig = {
+      enabled: true,
+      role: "client",
+      client: { hubAddress, teamToken },
+    };
+    if (userToken) sharingConfig.client.userToken = userToken;
+
+    const statusMsg = joinOk
+      ? `已加入团队，重启 gateway 即生效`
+      : `Hub 暂不可达，gateway 启动时会自动加入`;
+    console.log(`
+${GREEN}${BOLD}  ┌────────────────────────────────────────────────────────────┐
+  │  ✔ Client 配置完成！/ Client configured!                  │
+  │  ${CYAN}Hub: ${hubAddress}${GREEN}
+  │  ${CYAN}${statusMsg}${GREEN}
+  └────────────────────────────────────────────────────────────┘${RESET}
+`);
+
+  } else {
+    prompt.close();
+    warn(`无效选择 "${roleAns}"，跳过配置。你可以稍后在 openclaw.json 中手动配置。`);
+    return;
+  }
+
+  prompt.close();
+
+  try {
+    if (!cfg.plugins) cfg.plugins = {};
+    if (!cfg.plugins.entries) cfg.plugins.entries = {};
+    if (!cfg.plugins.entries["memos-local-openclaw-plugin"]) {
+      cfg.plugins.entries["memos-local-openclaw-plugin"] = { enabled: true };
+    }
+    const entry = cfg.plugins.entries["memos-local-openclaw-plugin"];
+    if (!entry.config) entry.config = {};
+    entry.config.sharing = sharingConfig;
+
+    const backup = cfgPath + ".bak-" + Date.now();
+    fs.copyFileSync(cfgPath, backup);
+    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+    ok(`配置已写入 / Config saved: ${DIM}~/.openclaw/openclaw.json${RESET}`);
+    log(`备份 / Backup: ${DIM}${backup}${RESET}`);
+  } catch (e) {
+    fail(`写入配置失败 / Config write failed: ${e.message}`);
+    warn("请手动编辑 ~/.openclaw/openclaw.json 添加 sharing 配置。");
+  }
+}
+
+(async () => {
+  try {
+    await setupSharingWizard();
+  } catch (e) {
+    warn(`Setup wizard error: ${e.message}`);
+  }
+
+  console.log(`
+${GREEN}${BOLD}  ┌──────────────────────────────────────────────────┐
+  │  ✔ Setup complete!                                │
+  │                                                    │
+  │  Restart gateway:                                  │
+  │  ${CYAN}openclaw gateway stop && openclaw gateway start${GREEN}  │
+  └──────────────────────────────────────────────────┘${RESET}
+`);
+  process.exit(0);
+})();
