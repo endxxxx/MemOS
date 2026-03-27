@@ -12,6 +12,10 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from tqdm import tqdm
 
+
+# Add the project root to the path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
 from evaluation.scripts.locomo.locomo_eval import (
     calculate_nlp_metrics,
     convert_numpy_types,
@@ -20,49 +24,55 @@ from evaluation.scripts.locomo.locomo_eval import (
 from evaluation.scripts.utils.client import OpenclawClient
 
 
-# Add the project root to the path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-
 load_dotenv()
 
 
-def update_plugin_and_restart(client_type, set_user_id=None, recall_enabled=None, add_enabled=None):
+def update_plugin_and_restart(client_type, **kwargs):
     """
     Update plugin configuration and restart the gateway so settings take effect.
+
+    Args:
+        client_type: The type of client (e.g., "memos-cloud", "memos-local", "openviking", "mem0", "mem9")
+        **kwargs: Configuration key-value pairs to update
     """
     if str(client_type).lower() == "openclaw":
         print("evaluating openclaw client, no need for plugin config update")
         return
-    if str(client_type).lower() not in ["memos", "openviking"]:
+    if str(client_type).lower() not in ["memos-cloud", "memos-local", "openviking", "mem0", "mem9"]:
         print(f"Warning: unknown client type: {client_type}, leaving all config as is")
         return
+
     base = "openclaw config set plugins.entries"
+
+    plugin_mapping = {
+        "mem0": "openclaw-mem0",
+        "memos-cloud": "memos-cloud-openclaw-plugin",
+        "memos-local": "memos-local-openclaw-plugin",
+        "mem9": "mem9",
+        "openviking": "openviking",
+    }
+
+    plugin_name = plugin_mapping.get(str(client_type).lower(), str(client_type).lower())
+
     cmds = []
-    if set_user_id is not None:
-        assert (
-            str(client_type).lower() == "memos"
-        )  # only memos-cloud-openclaw-plugin has this configuration
-        cmds.append(f"{base}.memos-cloud-openclaw-plugin.config.userId '{set_user_id}'")
-    if recall_enabled is not None:
-        if client_type == "memos":
-            cmds.append(
-                f"{base}.memos-cloud-openclaw-plugin.config.recallEnabled {str(recall_enabled).lower()}"
-            )
-        else:
-            cmds.append(f"{base}.openviking.config.autoRecall {str(recall_enabled).lower()}")
-    if add_enabled is not None:
-        if client_type == "memos":
-            cmds.append(
-                f"{base}.memos-cloud-openclaw-plugin.config.addEnabled {str(add_enabled).lower()}"
-            )
-        else:
-            cmds.append(f"{base}.openviking.config.autoCapture {str(add_enabled).lower()}")
+    for key, value in kwargs.items():
+        if value is not None:
+            config_key = key.replace("_", "-")
+            if isinstance(value, bool):
+                cmd = f"{base}.{plugin_name}.config.{config_key} {str(value).lower()}"
+            else:
+                cmd = f"{base}.{plugin_name}.config.{config_key} '{value}'"
+            cmds.append(cmd)
+
     for c in cmds:
         subprocess.run(c, shell=True, check=True)
-    # after updating config, restart the gateway
+
+    # Restart the gateway to apply the new config
     subprocess.run("openclaw gateway restart", shell=True, check=True)
+
     if cmds:
         print(f"Updated plugin config: {', '.join(cmds)}")
+
     time.sleep(10)
 
 
@@ -205,15 +215,18 @@ async def evaluate_client(
             continue
 
         # Sync memos_openclaw_plugin userId and restart gateway
-        if client_type == "memos":
-            update_plugin_and_restart(client_type, set_user_id=user_id)
+        if client_type in ["memos-cloud", "mem0"]:
+            update_plugin_and_restart(client_type, userId=user_id)
 
         user_responses = []
 
         print(f"Processing user {user_id}...")
 
         # Step 1: Add conversation to memory (enable add, disable recall)
-        update_plugin_and_restart(client_type, add_enabled=True, recall_enabled=False)
+        if str(client_type).lower() == "memos-cloud":
+            update_plugin_and_restart(client_type, add_enabled=True, recall_enabled=False)
+        elif str(client_type).lower() in ["mem0", "openviking"]:
+            update_plugin_and_restart(client_type, autoCapture=True, autoRecall=False)
         conversation = user_data.get("conversation", {})
         messages = process_conversation(conversation)
 
@@ -239,7 +252,10 @@ async def evaluate_client(
         time.sleep(60)  # Add delay to avoid rate limiting
 
         # Step 2: Process each QA pair in parallel (disable add, enable recall)
-        update_plugin_and_restart(client_type, add_enabled=False, recall_enabled=True)
+        if str(client_type).lower() == "memos-cloud":
+            update_plugin_and_restart(client_type, add_enabled=False, recall_enabled=True)
+        elif str(client_type).lower() in ["mem0", "openviking"]:
+            update_plugin_and_restart(client_type, autoCapture=False, autoRecall=True)
         qa_pairs = user_data.get("qa", [])
         print(f"Processing {len(qa_pairs)} QA pairs for {user_id}...current time: {datetime.now()}")
 
@@ -368,7 +384,7 @@ async def main():
     parser.add_argument(
         "--client_type",
         type=str,
-        choices=["openclaw", "memos", "openviking", "mem9"],
+        choices=["openclaw", "memos-cloud", "memos-local", "openviking", "mem9", "mem0"],
         default="openclaw",
         help="The type of client to evaluate",
     )
