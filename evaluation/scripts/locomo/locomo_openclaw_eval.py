@@ -13,14 +13,14 @@ from openai import AsyncOpenAI
 from tqdm import tqdm
 
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from evaluation.scripts.locomo.locomo_eval import (
+from scripts.locomo.locomo_eval import (
     calculate_nlp_metrics,
     convert_numpy_types,
     locomo_grader,
 )
-from evaluation.scripts.utils.client import OpenclawClient
+from scripts.utils.client import OpenclawClient
 
 
 load_dotenv()
@@ -446,7 +446,7 @@ async def main():
         api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL")
     )
 
-    data_path = "evaluation/data/locomo/locomo10.json"
+    data_path = "data/locomo/locomo10.json"
     with open(data_path) as f:
         data = json.load(f)
 

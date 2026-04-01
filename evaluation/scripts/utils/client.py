@@ -101,7 +101,6 @@ class OpenclawClient:
         self.header = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.apikey}",
-            "x-openclaw-agent-id": agent_id,
         }
 
     def add(self, messages, user_id, timestamp, batch_size=2):
@@ -115,6 +114,7 @@ class OpenclawClient:
                     payload = {
                         "model": "openclaw",
                         "messages": [{"role": "user", "content": concat_add_query}],
+                        "stream": False,
                     }
                     response = requests.post(
                         f"{self.baseurl}/v1/chat/completions",
@@ -145,6 +145,7 @@ class OpenclawClient:
                 payload = {
                     "model": "openclaw",
                     "messages": [{"role": "user", "content": query}],
+                    "stream": False,
                 }
                 response = requests.post(
                     f"{self.baseurl}/v1/chat/completions",
