@@ -11,7 +11,6 @@ from datetime import datetime
 import requests
 
 from dotenv import load_dotenv
-from tqdm import tqdm
 
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -132,7 +131,7 @@ class OpenclawClient:
         batches = [messages[i : i + batch_size] for i in range(0, len(messages), batch_size)]
         with ThreadPoolExecutor(max_workers=4) as executor:
             futures = {executor.submit(process_batch, batch): batch for batch in batches}
-            for future in tqdm(as_completed(futures), total=len(futures)):
+            for future in as_completed(futures):
                 try:
                     future.result()
                 except Exception:

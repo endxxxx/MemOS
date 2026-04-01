@@ -253,7 +253,7 @@ async def evaluate_client(
             print(f"Skipping memory addition for user {user_id} (all batches completed)")
             continue
 
-        for batch_idx in range(0, total_messages, batch_size):
+        for batch_idx in tqdm(range(0, total_messages, batch_size)):
             batch_start_time = time.time()
             batch_messages = user_messages[batch_idx : batch_idx + batch_size]
             batch_num = batch_idx // batch_size
