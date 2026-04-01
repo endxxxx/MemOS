@@ -227,7 +227,7 @@ async def evaluate_client(
             update_plugin_and_restart(client_type, userId=user_id)
 
         if str(client_type).lower() == "memos-cloud":
-            update_plugin_and_restart(client_type, add_enabled=True, recall_enabled=False)
+            update_plugin_and_restart(client_type, addEnabled=True, recallEnabled=False)
         elif str(client_type).lower() in ["mem0", "openviking"]:
             update_plugin_and_restart(client_type, autoCapture=True, autoRecall=False)
 
@@ -300,7 +300,7 @@ async def evaluate_client(
             update_plugin_and_restart(client_type, userId=user_id)
 
         if str(client_type).lower() == "memos-cloud":
-            update_plugin_and_restart(client_type, add_enabled=False, recall_enabled=True)
+            update_plugin_and_restart(client_type, addEnabled=False, recallEnabled=True)
         elif str(client_type).lower() in ["mem0", "openviking"]:
             update_plugin_and_restart(client_type, autoCapture=False, autoRecall=True)
 
