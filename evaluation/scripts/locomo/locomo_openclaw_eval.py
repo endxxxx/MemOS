@@ -223,10 +223,6 @@ async def evaluate_client(
     for user_idx, user_data in enumerate(data):
         user_id = f"locomo_exp_user_{user_idx}"
 
-        if resume and f"{user_idx}_0" in completed_add_records:
-            print(f"Skipping memory addition for user {user_id} (already completed)")
-            continue
-
         if client_type in ["memos-cloud", "mem0"]:
             update_plugin_and_restart(client_type, userId=user_id)
 
@@ -244,7 +240,17 @@ async def evaluate_client(
         total_messages = len(user_messages)
 
         if total_messages == 0:
-            _append_success_record(add_records_path, f"{user_idx}_0")
+            if resume and f"{user_idx}_0" not in completed_add_records:
+                _append_success_record(add_records_path, f"{user_idx}_0")
+            continue
+
+        num_batches = (total_messages + batch_size - 1) // batch_size
+        all_batches_completed = all(
+            f"{user_idx}_{i}" in completed_add_records for i in range(num_batches)
+        )
+
+        if resume and all_batches_completed:
+            print(f"Skipping memory addition for user {user_id} (all batches completed)")
             continue
 
         for batch_idx in range(0, total_messages, batch_size):
