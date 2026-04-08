@@ -80,11 +80,36 @@ def main(file_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate OpenCoMo results on LoCoMo dataset")
-    parser.add_argument("client_type", type=str, help="Client type, e.g., 'openclaw' or 'mem0'")
-    parser.add_argument("version", type=str, help="Version of the evaluation")
+    parser.add_argument(
+        "--client_type",
+        type=str,
+        default=None,
+        help="Client type, e.g. 'memos-cloud' or 'mem0'",
+    )
+    parser.add_argument(
+        "--version",
+        type=str,
+        default=None,
+        help="Version label of the evaluation (results directory suffix)",
+    )
+    parser.add_argument(
+        "client_type_pos",
+        nargs="?",
+        default=None,
+        help="Deprecated: use --client_type",
+    )
+    parser.add_argument(
+        "version_pos",
+        nargs="?",
+        default=None,
+        help="Deprecated: use --version",
+    )
 
     args = parser.parse_args()
-    file_path = os.path.join(
-        "results", "locomo", f"{args.client_type}-{args.version}", "locomo_judged.json"
-    )
+    client_type = args.client_type or args.client_type_pos
+    version = args.version or args.version_pos
+    if not client_type or not version:
+        parser.error("Provide --client_type and --version (or two positional arguments)")
+
+    file_path = os.path.join("results", "locomo", f"{client_type}-{version}", "locomo_judged.json")
     main(file_path)

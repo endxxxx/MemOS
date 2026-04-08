@@ -94,6 +94,8 @@ class Mem0Client:
 
 
 class OpenclawClient:
+    """HTTP client for OpenClaw Gateway OpenAI-compatible /v1/chat/completions."""
+
     def __init__(self, apikey: str, baseurl: str, agent_id: str = "main"):
         self.apikey = apikey
         self.baseurl = baseurl
@@ -101,6 +103,10 @@ class OpenclawClient:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.apikey}",
         }
+        self.agent_id = agent_id
+
+    def set_agent_id(self, agent_id: str):
+        self.agent_id = agent_id
 
     def add(self, messages, user_id, timestamp, batch_size=2):
         def process_batch(batch_messages):
@@ -111,7 +117,7 @@ class OpenclawClient:
             for attempt in range(max_retries):
                 try:
                     payload = {
-                        "model": "openclaw",
+                        "model": f"openclaw/{self.agent_id}",
                         "messages": [{"role": "user", "content": concat_add_query}],
                         "stream": False,
                     }
@@ -129,7 +135,7 @@ class OpenclawClient:
                         raise e
 
         batches = [messages[i : i + batch_size] for i in range(0, len(messages), batch_size)]
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=1) as executor:
             futures = {executor.submit(process_batch, batch): batch for batch in batches}
             for future in as_completed(futures):
                 try:
@@ -142,7 +148,7 @@ class OpenclawClient:
         for attempt in range(max_retries):
             try:
                 payload = {
-                    "model": "openclaw",
+                    "model": f"openclaw/{self.agent_id}",
                     "messages": [{"role": "user", "content": query}],
                     "stream": False,
                 }
