@@ -42,6 +42,8 @@ def update_plugin_and_restart(client_type, **kwargs):
         "memos-local": "memos-local-openclaw-plugin",
         "mem9": "mem9",
         "openviking": "openviking",
+        "supermemory": "openclaw-supermemory",
+        "memorylake": "memorylake-openclaw",
     }
 
     plugin_name = plugin_mapping.get(str(client_type).lower(), str(client_type).lower())
@@ -225,10 +227,11 @@ async def evaluate_client(
 
         if client_type in ["memos-cloud", "mem0"]:
             update_plugin_and_restart(client_type, userId=user_id)
-
+        if str(client_type).lower() == "supermemory":
+            update_plugin_and_restart(client_type, containerTag=user_id)
         if str(client_type).lower() == "memos-cloud":
             update_plugin_and_restart(client_type, addEnabled=True, recallEnabled=False)
-        elif str(client_type).lower() in ["mem0", "openviking"]:
+        elif str(client_type).lower() in ["mem0", "openviking", "memorylake", "supermemory"]:
             update_plugin_and_restart(client_type, autoCapture=True, autoRecall=False)
 
         conversation = user_data.get("conversation", {})
@@ -298,10 +301,11 @@ async def evaluate_client(
 
         if client_type in ["memos-cloud", "mem0"]:
             update_plugin_and_restart(client_type, userId=user_id)
-
+        if str(client_type).lower() == "supermemory":
+            update_plugin_and_restart(client_type, containerTag=user_id)
         if str(client_type).lower() == "memos-cloud":
             update_plugin_and_restart(client_type, addEnabled=False, recallEnabled=True)
-        elif str(client_type).lower() in ["mem0", "openviking"]:
+        elif str(client_type).lower() in ["mem0", "openviking", "memorylake"]:
             update_plugin_and_restart(client_type, autoCapture=False, autoRecall=True)
 
         print(f"Processing QA for user {user_id}...current time: {datetime.now()}")
@@ -411,7 +415,16 @@ async def main():
     parser.add_argument(
         "--client_type",
         type=str,
-        choices=["openclaw", "memos-cloud", "memos-local", "openviking", "mem9", "mem0"],
+        choices=[
+            "openclaw",
+            "memos-cloud",
+            "memos-local",
+            "openviking",
+            "mem9",
+            "mem0",
+            "supermemory",
+            "memorylake",
+        ],
         default="openclaw",
         help="The type of client to evaluate",
     )
