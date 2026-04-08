@@ -23,9 +23,6 @@ from scripts.locomo.locomo_eval import (
 from scripts.utils.client import OpenclawClient
 
 
-load_dotenv()
-
-
 def update_plugin_and_restart(client_type, **kwargs):
     if str(client_type).lower() == "openclaw":
         print("evaluating openclaw client, no need for plugin config update")

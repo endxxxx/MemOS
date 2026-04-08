@@ -23,6 +23,7 @@ from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
 
+load_dotenv()
 logging.basicConfig(level=logging.CRITICAL)
 transformers.logging.set_verbosity_error()
 encoding = tiktoken.get_encoding("cl100k_base")
