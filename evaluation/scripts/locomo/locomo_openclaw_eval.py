@@ -13,14 +13,16 @@ from openai import AsyncOpenAI
 from tqdm import tqdm
 
 
+load_dotenv()
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from scripts.locomo.locomo_eval import (
+from scripts.locomo.locomo_eval import (  # noqa: E402
     calculate_nlp_metrics,
     convert_numpy_types,
     locomo_grader,
 )
-from scripts.utils.client import OpenclawClient
+from scripts.utils.client import OpenclawClient  # noqa: E402
 
 
 def update_plugin_and_restart(client_type, **kwargs):
