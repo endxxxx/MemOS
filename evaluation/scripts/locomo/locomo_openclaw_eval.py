@@ -230,7 +230,7 @@ async def evaluate_client(
             os.remove(add_records_path)
 
     for user_idx, user_data in enumerate(data):
-        user_id = f"locomo_exp_user_{user_idx}"
+        user_id = f"locomo_exp_user_{user_idx}_{version}"
 
         if client_type in ["memos-cloud", "mem0"]:
             update_plugin_and_restart(client_type, userId=user_id)
@@ -303,7 +303,7 @@ async def evaluate_client(
             os.remove(qa_records_path)
 
     for user_idx, user_data in enumerate(data):
-        user_id = f"locomo_exp_user_{user_idx}"
+        user_id = f"locomo_exp_user_{user_idx}_{version}"
         qa_pairs = user_data.get("qa", [])
 
         if client_type in ["memos-cloud", "mem0"]:
