@@ -29,7 +29,15 @@ def update_plugin_and_restart(client_type, **kwargs):
     if str(client_type).lower() == "openclaw":
         print("evaluating openclaw client, no need for plugin config update")
         return
-    if str(client_type).lower() not in ["memos-cloud", "memos-local", "openviking", "mem0", "mem9"]:
+    if str(client_type).lower() not in [
+        "memos-cloud",
+        "memos-local",
+        "openviking",
+        "mem0",
+        "mem9",
+        "supermemory",
+        "memorylake",
+    ]:
         print(f"Warning: unknown client type: {client_type}, leaving all config as is")
         return
 
