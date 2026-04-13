@@ -29,7 +29,7 @@ async def locomo_response(frame, llm_client, context: str, question: str) -> str
             context=context,
             question=question,
         )
-    elif frame == "mem0" or frame == "mem0_graph":
+    elif frame == "mem0" or frame == "mem0_graph" or frame == "openviking" or frame == "viking":
         prompt = ANSWER_PROMPT_MEM0.format(
             context=context,
             question=question,
@@ -142,6 +142,8 @@ if __name__ == "__main__":
             "memobase",
             "memu",
             "supermemory",
+            "openviking",
+            "viking",
         ],
         default="memos-api",
     )

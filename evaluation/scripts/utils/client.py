@@ -184,6 +184,7 @@ class MemosApiClient:
                 "mode": os.getenv("SEARCH_MODE", "fast"),
                 "include_preference": True,
                 "pref_top_k": 6,
+                "relativity": 0,
             },
             ensure_ascii=False,
         )
@@ -352,6 +353,226 @@ class MemuClient:
             if status.status in ["SUCCESS", "FAILURE", "REVOKED"]:
                 break
             time.sleep(2)
+
+
+class OpenVikingClient:
+    def __init__(self):
+        import requests
+
+        self.requests = requests
+        self.base_url = os.getenv("OPENVIKING_URL", "http://localhost:1933")
+        self.session_cache = {}
+
+    def add(self, messages, user_id, timestamp, batch_size=50):
+        max_retries = 5
+        session_id = f"{user_id}_session"
+
+        # Create session if it doesn't exist
+        if session_id not in self.session_cache:
+            for attempt in range(max_retries):
+                try:
+                    # Check if session exists
+                    response = self.requests.get(f"{self.base_url}/api/v1/sessions/{session_id}")
+                    if response.status_code == 404:
+                        # Create new session
+                        response = self.requests.post(f"{self.base_url}/api/v1/sessions")
+                        response.raise_for_status()
+                        session_data = response.json()
+                        self.session_cache[session_id] = session_data["result"]["session_id"]
+                    elif response.status_code == 200:
+                        # Session already exists
+                        self.session_cache[session_id] = session_id
+                    else:
+                        response.raise_for_status()
+                    break
+                except Exception:
+                    if attempt < max_retries - 1:
+                        time.sleep(2**attempt)
+                    else:
+                        # If session creation fails, continue with session_id
+                        self.session_cache[session_id] = session_id
+                        break
+
+        # Get session ID
+        current_session_id = self.session_cache[session_id]
+
+        # Add messages to session
+        for msg in messages:
+            for attempt in range(max_retries):
+                try:
+                    response = self.requests.post(
+                        f"{self.base_url}/api/v1/sessions/{current_session_id}/messages",
+                        json={"role": msg.get("role", "user"), "content": msg.get("content", "")},
+                    )
+                    response.raise_for_status()
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        time.sleep(2**attempt)
+                    else:
+                        raise e
+
+        # Commit session
+        for attempt in range(max_retries):
+            try:
+                response = self.requests.post(
+                    f"{self.base_url}/api/v1/sessions/{current_session_id}/commit"
+                )
+                response.raise_for_status()
+                commit_data = response.json()
+                task_id = commit_data["result"].get("task_id")
+
+                # Wait for task to complete
+                if task_id:
+                    for _task_attempt in range(max_retries):
+                        try:
+                            task_response = self.requests.get(
+                                f"{self.base_url}/api/v1/tasks/{task_id}"
+                            )
+                            task_response.raise_for_status()
+                            task_status = task_response.json()["result"]["status"]
+                            if task_status == "completed":
+                                break
+                            time.sleep(1)
+                        except Exception:
+                            time.sleep(1)
+                break
+            except Exception:
+                if attempt < max_retries - 1:
+                    time.sleep(2**attempt)
+                else:
+                    # If commit fails, continue anyway
+                    break
+
+    def search(self, query, user_id, top_k):
+        max_retries = 5
+        session_id = f"{user_id}_session"
+
+        # Get session ID from cache
+        current_session_id = self.session_cache.get(session_id, session_id)
+
+        for attempt in range(max_retries):
+            try:
+                # Send HTTP request to search using correct API format
+                response = self.requests.post(
+                    f"{self.base_url}/api/v1/search/search",
+                    json={"query": query, "limit": top_k, "session_id": current_session_id},
+                )
+                response.raise_for_status()
+                search_results = response.json()
+
+                # Extract and format results
+                results = []
+
+                # Check for different types of results
+                if "result" in search_results:
+                    result_data = search_results["result"]
+                    for item in result_data["memories"]:
+                        if item.get("content"):
+                            results.append(item["content"])
+                        elif "uri" in item:
+                            try:
+                                # Read content from URI
+                                read_response = self.requests.get(
+                                    f"{self.base_url}/api/v1/content/read?uri={item['uri']}"
+                                )
+                                if read_response.status_code == 200:
+                                    read_data = read_response.json()
+                                    if "result" in read_data:
+                                        results.append(read_data["result"])
+                            except Exception:
+                                pass
+
+                return results
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2**attempt)
+                else:
+                    raise e
+
+
+class VikingClient:
+    def __init__(self):
+        import requests
+
+        self.requests = requests
+        self.base_url = "https://api-knowledgebase.mlp.cn-beijing.volces.com"
+        self.api_key = os.getenv("VIKING_MEMORY_API_KEY")
+        self.headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+
+    def add(self, messages, user_id, timestamp, batch_size=50):
+        max_retries = 5
+        url = f"{self.base_url}/api/memory/session/add"
+
+        for i in range(0, len(messages), batch_size):
+            batch_messages = messages[i : i + batch_size]
+            for attempt in range(max_retries):
+                try:
+                    payload = {
+                        "collection_name": "locomo_eval",
+                        "project_name": "default",
+                        "messages": batch_messages,
+                        "metadata": {
+                            "default_user_id": user_id,
+                            "default_user_name": user_id,
+                            "default_assistant_id": "assistant_01",
+                            "default_assistant_name": "Robot",
+                            "time": int(timestamp * 1000),  # 转换为毫秒
+                        },
+                    }
+
+                    response = self.requests.post(url, headers=self.headers, json=payload)
+                    response.raise_for_status()
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        time.sleep(2**attempt)
+                    else:
+                        raise e
+
+    def search(self, query, user_id, top_k):
+        max_retries = 5
+        url = f"{self.base_url}/api/memory/get_context"
+
+        for attempt in range(max_retries):
+            try:
+                payload = {
+                    "collection_name": "locomo_eval",
+                    "project_name": "default",
+                    "conversation_id": f"conversation_{user_id}",
+                    "query": query,
+                    "event_search_config": {
+                        "filter": {"user_id": user_id, "memory_type": ["event_v1"]},
+                        "limit": top_k,
+                        "time_decay_config": {"weight": 0.5, "no_decay_period": 3},
+                    },
+                    "profile_search_config": {
+                        "filter": {"user_id": user_id, "memory_type": ["profile_v1"]},
+                        "limit": 1,
+                    },
+                }
+
+                response = self.requests.post(url, headers=self.headers, json=payload)
+                response.raise_for_status()
+                search_results = response.json()
+
+                # Extract and format results
+                results = []
+                if "data" in search_results:
+                    # 根据实际返回结构提取结果
+                    # 这里需要根据实际 API 返回结构进行调整
+                    # 暂时返回整个结果
+                    results.append(str(search_results["data"]))
+
+                return results
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2**attempt)
+                else:
+                    raise e
 
 
 if __name__ == "__main__":

@@ -81,6 +81,9 @@ def ingest_session(client, session, frame, version, metadata):
             m["chat_time"] = iso_date
         client.add(speaker_a_messages, speaker_a_user_id)
         client.add(speaker_b_messages, speaker_b_user_id)
+    elif frame == "openviking" or frame == "viking":
+        client.add(speaker_a_messages, speaker_a_user_id, timestamp, batch_size=2)
+        client.add(speaker_b_messages, speaker_b_user_id, timestamp, batch_size=2)
 
     end_time = time.time()
     elapsed_time = round(end_time - start_time, 2)
@@ -128,6 +131,14 @@ def process_user(conv_idx, frame, locomo_df, version, success_records, f):
         from utils.client import SupermemoryClient
 
         client = SupermemoryClient()
+    elif frame == "openviking":
+        from utils.client import OpenVikingClient
+
+        client = OpenVikingClient()
+    elif frame == "viking":
+        from utils.client import VikingClient
+
+        client = VikingClient()
     sessions_to_process = []
     for session_idx in range(max_session_count):
         session_key = f"session_{session_idx}"
@@ -221,6 +232,8 @@ if __name__ == "__main__":
             "memobase",
             "memu",
             "supermemory",
+            "openviking",
+            "viking",
         ],
         default="memos-api",
     )

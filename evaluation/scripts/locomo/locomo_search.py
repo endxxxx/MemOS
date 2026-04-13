@@ -106,11 +106,19 @@ def memos_api_search(
     search_b_results = client.search(query=query, user_id=speaker_b_user_id, top_k=top_k)
 
     speaker_a_context = (
-        "\n".join([i["memory"] for i in search_a_results["text_mem"][0]["memories"]])
+        "\n".join(
+            [i["memory"] for i in search_a_results["text_mem"][0]["memories"]]
+            if search_a_results["text_mem"]
+            else []
+        )
         + f"\n{search_a_results.get('pref_string', '')}"
     )
     speaker_b_context = (
-        "\n".join([i["memory"] for i in search_b_results["text_mem"][0]["memories"]])
+        "\n".join(
+            [i["memory"] for i in search_b_results["text_mem"][0]["memories"]]
+            if search_b_results["text_mem"]
+            else []
+        )
         + f"\n{search_b_results.get('pref_string', '')}"
     )
 
@@ -183,6 +191,50 @@ def supermemory_search(
     return context, duration_ms
 
 
+def openviking_search(
+    client, query, speaker_a_user_id, speaker_b_user_id, top_k, speaker_a, speaker_b
+):
+    from prompts import TEMPLATE_MEM0
+
+    start = time()
+    search_speaker_a_results = client.search(query, speaker_a_user_id, top_k)
+    search_speaker_b_results = client.search(query, speaker_b_user_id, top_k)
+
+    # Format results as strings
+    search_speaker_a_memory = "\n".join([str(r) for r in search_speaker_a_results])
+    search_speaker_b_memory = "\n".join([str(r) for r in search_speaker_b_results])
+
+    context = TEMPLATE_MEM0.format(
+        speaker_1_user_id=speaker_a,
+        speaker_1_memories=search_speaker_a_memory,
+        speaker_2_user_id=speaker_b,
+        speaker_2_memories=search_speaker_b_memory,
+    )
+    duration_ms = (time() - start) * 1000
+    return context, duration_ms
+
+
+def viking_search(client, query, speaker_a_user_id, speaker_b_user_id, top_k, speaker_a, speaker_b):
+    from prompts import TEMPLATE_MEM0
+
+    start = time()
+    search_speaker_a_results = client.search(query, speaker_a_user_id, top_k)
+    search_speaker_b_results = client.search(query, speaker_b_user_id, top_k)
+
+    # Format results as strings
+    search_speaker_a_memory = "\n".join([str(r) for r in search_speaker_a_results])
+    search_speaker_b_memory = "\n".join([str(r) for r in search_speaker_b_results])
+
+    context = TEMPLATE_MEM0.format(
+        speaker_1_user_id=speaker_a,
+        speaker_1_memories=search_speaker_a_memory,
+        speaker_2_user_id=speaker_b,
+        speaker_2_memories=search_speaker_b_memory,
+    )
+    duration_ms = (time() - start) * 1000
+    return context, duration_ms
+
+
 def search_query(client, query, metadata, frame, version, top_k=20):
     _conv_id = metadata.get("conv_id")
     speaker_a = metadata.get("speaker_a")
@@ -215,6 +267,14 @@ def search_query(client, query, metadata, frame, version, top_k=20):
         speaker_a_user_id = f"lcm{conv_idx}a_{version}"
         speaker_b_user_id = f"lcm{conv_idx}b_{version}"
         context, duration_ms = supermemory_search(
+            client, query, speaker_a_user_id, speaker_b_user_id, top_k, speaker_a, speaker_b
+        )
+    elif frame == "openviking":
+        context, duration_ms = openviking_search(
+            client, query, speaker_a_user_id, speaker_b_user_id, top_k, speaker_a, speaker_b
+        )
+    elif frame == "viking":
+        context, duration_ms = viking_search(
             client, query, speaker_a_user_id, speaker_b_user_id, top_k, speaker_a, speaker_b
         )
     return context, duration_ms
@@ -273,6 +333,14 @@ def process_user(conv_idx, locomo_df, frame, version, top_k=20, num_workers=1):
         from utils.client import SupermemoryClient
 
         client = SupermemoryClient()
+    elif frame == "openviking":
+        from utils.client import OpenVikingClient
+
+        client = OpenVikingClient()
+    elif frame == "viking":
+        from utils.client import VikingClient
+
+        client = VikingClient()
 
     metadata = {
         "speaker_a": speaker_a,
@@ -348,6 +416,8 @@ if __name__ == "__main__":
             "memobase",
             "memu",
             "supermemory",
+            "openviking",
+            "viking",
         ],
         default="memos-api",
     )

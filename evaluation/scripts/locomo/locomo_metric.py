@@ -17,6 +17,8 @@ parser.add_argument(
         "memobase",
         "memu",
         "supermemory",
+        "openviking",
+        "viking",
     ],
     default="memos-api",
 )

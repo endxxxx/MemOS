@@ -398,6 +398,8 @@ if __name__ == "__main__":
             "memobase",
             "memu",
             "supermemory",
+            "openviking",
+            "viking",
         ],
         default="memos-api",
     )
