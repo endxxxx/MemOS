@@ -76,6 +76,19 @@ def update_plugin_and_restart(client_type, **kwargs):
     time.sleep(10)
 
 
+def update_model_apikey_and_base_url(model_apikey=None, model_base_url=None):
+    if model_apikey is None and model_base_url is None:
+        print("No model apikey or base url provided, leaving all config as is")
+        return
+    if model_apikey is not None:
+        cmd = f"openclaw config set models.providers.openai-codex.apiKey '{model_apikey}'"
+        subprocess.run(cmd, shell=True, check=True)
+    if model_base_url is not None:
+        cmd = f"openclaw config set models.providers.openai-codex.baseUrl '{model_base_url}'"
+        subprocess.run(cmd, shell=True, check=True)
+    subprocess.run("openclaw gateway restart", shell=True, check=True)
+
+
 def parse_datetime(date_time_str):
     try:
         cleaned_str = date_time_str.replace("on", "").strip()
@@ -219,6 +232,10 @@ async def evaluate_client(
     loop = asyncio.get_event_loop()
 
     print("\n=== Stage 1: Memory Addition ===")
+    update_model_apikey_and_base_url(
+        model_apikey=os.getenv("MEMORY_ADDITION_API_KEY"),
+        model_base_url=os.getenv("MEMORY_ADDITION_BASE_URL"),
+    )
     add_start_time = time.time()
 
     if resume:
@@ -292,6 +309,10 @@ async def evaluate_client(
     print(f"Memory addition stage completed in {(add_end_time - add_start_time):.2f}s")
 
     print("\n=== Stage 2: QA Processing ===")
+    update_model_apikey_and_base_url(
+        model_apikey=os.getenv("QA_PROCESSING_API_KEY"),
+        model_base_url=os.getenv("QA_PROCESSING_BASE_URL"),
+    )
     qa_start_time = time.time()
 
     if resume:
