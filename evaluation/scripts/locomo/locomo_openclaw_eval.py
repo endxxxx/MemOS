@@ -251,8 +251,9 @@ async def evaluate_client(
 
     for user_idx, user_data in enumerate(data):
         user_id = f"locomo_exp_user_{user_idx}_{version}"
+        client.set_agent_id(user_id)
 
-        if client_type in ["memos-cloud", "mem0"]:
+        if str(client_type).lower() in ["memos-cloud", "mem0"]:
             update_plugin_and_restart(client_type, userId=user_id)
         if str(client_type).lower() == "supermemory":
             update_plugin_and_restart(client_type, containerTag=user_id)
@@ -328,17 +329,18 @@ async def evaluate_client(
 
     for user_idx, user_data in enumerate(data):
         user_id = f"locomo_exp_user_{user_idx}_{version}"
-        qa_pairs = user_data.get("qa", [])
+        client.set_agent_id(user_id)
 
-        if client_type in ["memos-cloud", "mem0"]:
+        if str(client_type).lower() in ["memos-cloud", "mem0"]:
             update_plugin_and_restart(client_type, userId=user_id)
         if str(client_type).lower() == "supermemory":
             update_plugin_and_restart(client_type, containerTag=user_id)
         if str(client_type).lower() == "memos-cloud":
             update_plugin_and_restart(client_type, addEnabled=False, recallEnabled=True)
-        elif str(client_type).lower() in ["mem0", "openviking", "memorylake"]:
+        elif str(client_type).lower() in ["mem0", "openviking", "memorylake", "supermemory"]:
             update_plugin_and_restart(client_type, autoCapture=False, autoRecall=True)
 
+        qa_pairs = user_data.get("qa", [])
         print(f"Processing QA for user {user_id}...current time: {datetime.now()}")
 
         semaphore = asyncio.Semaphore(4)
@@ -382,7 +384,7 @@ async def evaluate_client(
             continue
 
         graded_responses = []
-        semaphore = asyncio.Semaphore(30)
+        semaphore = asyncio.Semaphore(3)
 
         async def grade_with_semaphore(response, semaphore=semaphore):
             async with semaphore:
