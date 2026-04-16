@@ -192,6 +192,9 @@ def _append_success_record(path, record):
 
 
 def _save_stage_timing(path, stage_name, start_time, end_time):
+    # transform start_time and end_time to datetime
+    start_time_str = str(datetime.fromtimestamp(start_time))
+    end_time_str = str(datetime.fromtimestamp(end_time))
     timing_data = {}
     if os.path.exists(path):
         try:
@@ -201,8 +204,8 @@ def _save_stage_timing(path, stage_name, start_time, end_time):
             timing_data = {}
 
     timing_data[stage_name] = {
-        "start_time": start_time,
-        "end_time": end_time,
+        "start_time": start_time_str,
+        "end_time": end_time_str,
         "duration_ms": (end_time - start_time) * 1000,
     }
 
@@ -487,7 +490,7 @@ async def main():
         api_key=os.getenv("OPENAI_API_KEY"), base_url=os.getenv("OPENAI_BASE_URL")
     )
 
-    data_path = "data/locomo/locomo10.json"
+    data_path = "/root/MemOS/evaluation/data/locomo/locomo10.json"
     with open(data_path) as f:
         data = json.load(f)
 
