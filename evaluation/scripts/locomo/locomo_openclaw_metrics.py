@@ -3,8 +3,9 @@ import json
 import os
 
 
-def main(file_path):
+def main(result_dir):
     # read the json file
+    file_path = os.path.join(result_dir, "locomo_judged.json")
     with open(file_path, encoding="utf-8") as f:
         data = json.load(f)
 
@@ -77,6 +78,18 @@ def main(file_path):
             f"{category_code:<10} {category_name:<20} {total:<10} {correct:<10} {category_accuracy:.4f}"
         )
 
+    # save results to a json file
+    results = {
+        "total_questions": total_questions,
+        "correct_predictions": correct_predictions,
+        "accuracy": accuracy,
+        "average_f1": average_f1,
+        "category_stats": category_stats,
+    }
+    with open(os.path.join(result_dir, "locomo_openclaw_metrics.json"), "w") as f:
+        json.dump(results, f, indent=4)
+    print(f"Results saved to: {os.path.join(result_dir, 'locomo_openclaw_metrics.json')}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate OpenCoMo results on LoCoMo dataset")
@@ -111,5 +124,6 @@ if __name__ == "__main__":
     if not client_type or not version:
         parser.error("Provide --client_type and --version (or two positional arguments)")
 
-    file_path = os.path.join("results", "locomo", f"{client_type}-{version}", "locomo_judged.json")
-    main(file_path)
+    result_dir = f"results/locomo/{client_type}-{version}"
+
+    main(result_dir)
