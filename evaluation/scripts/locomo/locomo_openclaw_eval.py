@@ -250,7 +250,7 @@ async def evaluate_client(
             os.remove(add_records_path)
 
     for user_idx, user_data in enumerate(data):
-        user_id = f"locomo_exp_user_{user_idx}_{version}"
+        user_id = f"locomo_exp_user_{user_idx}_{client_type}_{version}"
         client.set_agent_id(user_id)
 
         if str(client_type).lower() in ["memos-cloud", "mem0"]:
@@ -328,7 +328,7 @@ async def evaluate_client(
             os.remove(qa_records_path)
 
     for user_idx, user_data in enumerate(data):
-        user_id = f"locomo_exp_user_{user_idx}_{version}"
+        user_id = f"locomo_exp_user_{user_idx}_{client_type}_{version}"
         client.set_agent_id(user_id)
 
         if str(client_type).lower() in ["memos-cloud", "mem0"]:
