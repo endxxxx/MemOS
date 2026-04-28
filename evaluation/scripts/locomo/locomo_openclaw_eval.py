@@ -36,6 +36,7 @@ def update_plugin_and_restart(client_type, **kwargs):
         "memorylake": "memorylake-openclaw",
         "honcho": "openclaw-honcho",
         "byterover": "byterover",
+        "hindsight": "hindsight-openclaw",
     }
 
     if str(client_type).lower() == "openclaw":
@@ -253,6 +254,8 @@ async def evaluate_client(
             update_plugin_and_restart(client_type, userId=user_id)
         if str(client_type).lower() == "supermemory":
             update_plugin_and_restart(client_type, containerTag=user_id)
+        if str(client_type).lower() == "hindsight":
+            update_plugin_and_restart(client_type, autoRetain=True, autoRecall=False)
         if str(client_type).lower() == "memos-cloud":
             update_plugin_and_restart(client_type, addEnabled=True, recallEnabled=False)
         elif str(client_type).lower() in ["mem0", "openviking", "memorylake", "supermemory"]:
@@ -333,6 +336,8 @@ async def evaluate_client(
             update_plugin_and_restart(client_type, userId=user_id)
         if str(client_type).lower() == "supermemory":
             update_plugin_and_restart(client_type, containerTag=user_id)
+        if str(client_type).lower() == "hindsight":
+            update_plugin_and_restart(client_type, autoRetain=False, autoRecall=True)
         if str(client_type).lower() == "memos-cloud":
             update_plugin_and_restart(client_type, addEnabled=False, recallEnabled=True)
         elif str(client_type).lower() in ["mem0", "openviking", "memorylake", "supermemory"]:
@@ -457,6 +462,7 @@ async def main():
             "memorylake",
             "honcho",
             "byterover",
+            "hindsight",
         ],
         default="openclaw",
         help="The type of client to evaluate",
