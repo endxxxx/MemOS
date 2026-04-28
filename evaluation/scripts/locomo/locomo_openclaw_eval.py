@@ -51,6 +51,7 @@ def update_plugin_and_restart(client_type, **kwargs):
         "openviking": "openviking",
         "supermemory": "openclaw-supermemory",
         "memorylake": "memorylake-openclaw",
+        "honcho": "openclaw-honcho",
     }
 
     plugin_name = plugin_mapping.get(str(client_type).lower(), str(client_type).lower())
@@ -253,6 +254,8 @@ async def evaluate_client(
         user_id = f"locomo_exp_user_{user_idx}_{client_type}_{version}"
         client.set_agent_id(user_id)
 
+        if str(client_type).lower() == "honcho":
+            update_plugin_and_restart(client_type, workspaceId=user_id)
         if str(client_type).lower() in ["memos-cloud", "mem0"]:
             update_plugin_and_restart(client_type, userId=user_id)
         if str(client_type).lower() == "supermemory":
@@ -331,6 +334,8 @@ async def evaluate_client(
         user_id = f"locomo_exp_user_{user_idx}_{client_type}_{version}"
         client.set_agent_id(user_id)
 
+        if str(client_type).lower() == "honcho":
+            update_plugin_and_restart(client_type, workspaceId=user_id)
         if str(client_type).lower() in ["memos-cloud", "mem0"]:
             update_plugin_and_restart(client_type, userId=user_id)
         if str(client_type).lower() == "supermemory":
@@ -457,6 +462,7 @@ async def main():
             "mem0",
             "supermemory",
             "memorylake",
+            "honcho",
         ],
         default="openclaw",
         help="The type of client to evaluate",
