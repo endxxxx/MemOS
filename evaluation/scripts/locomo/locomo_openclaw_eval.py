@@ -35,6 +35,7 @@ def update_plugin_and_restart(client_type, **kwargs):
         "supermemory": "openclaw-supermemory",
         "memorylake": "memorylake-openclaw",
         "honcho": "openclaw-honcho",
+        "byterover": "byterover",
     }
 
     if str(client_type).lower() == "openclaw":
@@ -455,6 +456,7 @@ async def main():
             "supermemory",
             "memorylake",
             "honcho",
+            "byterover",
         ],
         default="openclaw",
         help="The type of client to evaluate",
