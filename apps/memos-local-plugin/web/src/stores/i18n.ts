@@ -260,6 +260,8 @@ const en = {
   "memories.field.support": "Support count",
   "memories.field.toolCalls": "Tool calls",
   "memories.field.episodeTimeline": "Steps in this task",
+  "memories.field.steps": "Steps in this turn ({n})",
+  "memories.card.steps": "{n} steps",
   // Tooltip helpers for memory metadata fields. Shown when the user
   // hovers the small "?" icon next to each label so they can find out
   // what the score means without leaving the drawer.
@@ -524,6 +526,7 @@ const en = {
   "logs.search.droppedByLlm": "Dropped by LLM",
   "logs.search.noCandidates": "No candidates.",
   "logs.search.noneRelevant": "Candidates were returned but the LLM dropped them all.",
+  "logs.search.funnel": "Retrieval funnel",
   "logs.add.warnings": "Warnings",
   "logs.add.details": "Per-turn items",
   "pager.pageN": "Page {n} / {total}",
@@ -832,6 +835,8 @@ const zh: Record<TranslationKey, string> = {
   "memories.field.support": "支撑任务数",
   "memories.field.toolCalls": "工具调用",
   "memories.field.episodeTimeline": "本任务的其他步骤",
+  "memories.field.steps": "本轮步骤（共 {n} 步）",
+  "memories.card.steps": "{n} 步",
   "memories.help.value":
     "记忆被捕获时的重要性评分（0–1）。值越高表示助手当时越觉得这条记忆值得保留。",
   "memories.help.alpha":
@@ -1067,6 +1072,7 @@ const zh: Record<TranslationKey, string> = {
   "logs.search.droppedByLlm": "LLM 剔除",
   "logs.search.noCandidates": "没有候选。",
   "logs.search.noneRelevant": "有候选但被 LLM 全部剔除。",
+  "logs.search.funnel": "召回漏斗",
   "logs.add.warnings": "警告",
   "logs.add.details": "每轮条目",
   "pager.pageN": "第 {n} 页 / 共 {total} 页",

@@ -40,6 +40,16 @@ export interface ToolCallDTO {
   errorCode?: string;
   startedAt: EpochMs;
   endedAt: EpochMs;
+  /**
+   * LLM-native thinking emitted *before* the model decided to invoke this
+   * tool — e.g. "I got an error from tool_1, let me try a different
+   * approach". Populated by the adapter when the model interleaves
+   * thinking blocks between tool calls. `undefined` for legacy data or
+   * when no thinking preceded this particular call.
+   *
+   * Stored inside `tool_calls_json` (no schema migration needed).
+   */
+  thinkingBefore?: string;
 }
 
 export interface TurnInputDTO {
@@ -133,6 +143,17 @@ export interface TraceDTO {
   rHuman?: Reward;
   /** Cached priority used for L2 candidate selection. */
   priority: number;
+  /**
+   * Stable group key shared by every L1 trace produced from the same
+   * user message. Equal to the user turn's `ts` (epoch ms). The
+   * viewer collapses rows with identical `(episodeId, turnId)` into
+   * a single "one round = one memory" card; algorithm-side machinery
+   * (V/α/L2/Tier 2/Decision Repair) ignores the field.
+   *
+   * Optional because rows written before migration 013 have NULL
+   * `turn_id`; the viewer falls back to per-row rendering for them.
+   */
+  turnId?: EpochMs | null;
 }
 
 /**

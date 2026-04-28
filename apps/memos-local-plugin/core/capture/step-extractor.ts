@@ -17,6 +17,11 @@
  *   - `toolCalls` = [single ToolCallDTO with input + output]
  *   - `agentThinking` = model thinking (first sub-step only, since
  *     the host provides thinking as a single blob)
+ *   - `meta.turnId` = the user turn's `ts`. Stable identifier shared
+ *     by every sub-step that came from the same user message — the
+ *     viewer uses it to collapse the row of sub-steps back into a
+ *     single "one round = one memory" card while the algorithm pipe-
+ *     line keeps operating on the step-level traces.
  *
  * This matches the algorithm spec `f(1)_{k,t} = (s, a, o, ρ, r)` where
  * each tool invocation is an independent action `a` with its own
@@ -68,7 +73,7 @@ export function extractSteps(episode: EpisodeSnapshot): StepCandidate[] {
         rawReflection: null,
         depth: depthFromMeta(episode.meta),
         isSubagent: Boolean(episode.meta.isSubagent),
-        meta: { synthetic: true },
+        meta: { synthetic: true, turnId: firstUser.ts },
       });
     }
   }
@@ -96,11 +101,17 @@ function segmentToSteps(
   const thinkingParts: string[] = [];
   let rawReflection: string | null = null;
   let segMeta: Record<string, unknown> = {};
+  // Stable id shared by every sub-step of the same user message.
+  // Defaults to the first user turn's `ts`; falls back to the first
+  // turn's `ts` for assistant-only segments (rare, but the synthetic
+  // step path also relies on this).
+  let turnId: EpochMs | null = null;
 
   for (const turn of turns) {
     switch (turn.role) {
       case "user":
         userTexts.push(turn.content);
+        if (turnId === null) turnId = turn.ts;
         break;
       case "tool":
         toolTurns.push(turn);
@@ -127,6 +138,10 @@ function segmentToSteps(
   const depth = depthFromMeta({ ...episode.meta, ...segMeta });
   const isSubagent = Boolean(segMeta.isSubagent ?? episode.meta.isSubagent);
   const fullThinking = thinkingParts.join("\n\n").trim() || null;
+  // Fallback if the segment had no user turn (assistant-only segment
+  // produced by some adapters): anchor turnId on the first turn we
+  // ever saw so downstream group_by still has something stable.
+  const segTurnId: EpochMs = (turnId ?? turns[0]!.ts);
 
   // ─── No tool calls → single step (backward compatible) ────────
   if (toolTurns.length === 0) {
@@ -146,7 +161,7 @@ function segmentToSteps(
       rawReflection,
       depth,
       isSubagent,
-      meta: segMeta,
+      meta: { ...segMeta, turnId: segTurnId },
     }];
   }
 
@@ -175,14 +190,24 @@ function segmentToSteps(
     out.push({
       key: `${episode.id}:${ts}:tool:${i}`,
       ts,
-      userText,
+      // Only the first sub-step carries the user query; subsequent
+      // sub-steps leave `userText` empty so the viewer's flattenChat
+      // doesn't render the same user bubble N times. The turn's
+      // provenance (episodeId) still links them together.
+      userText: i === 0 ? userText : "",
       agentText: "",
       agentThinking: i === 0 ? fullThinking : null,
       toolCalls: [tc],
       rawReflection: null,
       depth,
       isSubagent,
-      meta: { ...segMeta, subStep: true, subStepIdx: i, subStepTotal: total },
+      meta: {
+        ...segMeta,
+        subStep: true,
+        subStepIdx: i,
+        subStepTotal: total,
+        turnId: segTurnId,
+      },
     });
   }
 
@@ -198,7 +223,13 @@ function segmentToSteps(
       rawReflection,
       depth,
       isSubagent,
-      meta: { ...segMeta, subStep: true, subStepIdx: toolTurns.length, subStepTotal: total },
+      meta: {
+        ...segMeta,
+        subStep: true,
+        subStepIdx: toolTurns.length,
+        subStepTotal: total,
+        turnId: segTurnId,
+      },
     });
   }
 
@@ -232,6 +263,7 @@ function toolCallFromTurn(turn: EpisodeTurn): ToolCallDTO | null {
   const endedAt = typeof meta.endedAt === "number" ? meta.endedAt : turn.ts;
   const input = meta.input ?? meta.args ?? undefined;
   const errorCode = typeof meta.errorCode === "string" ? meta.errorCode : undefined;
+  const thinkingBefore = typeof meta.thinkingBefore === "string" ? meta.thinkingBefore : undefined;
   return {
     name,
     input,
@@ -239,6 +271,7 @@ function toolCallFromTurn(turn: EpisodeTurn): ToolCallDTO | null {
     errorCode,
     startedAt,
     endedAt,
+    thinkingBefore,
   };
 }
 
@@ -264,7 +297,8 @@ function coerceToolCall(raw: unknown): ToolCallDTO | null {
   const startedAt =
     typeof r.startedAt === "number" ? r.startedAt : Date.now();
   const endedAt = typeof r.endedAt === "number" ? r.endedAt : startedAt;
-  return { name, input, output, errorCode, startedAt, endedAt };
+  const thinkingBefore = typeof r.thinkingBefore === "string" ? r.thinkingBefore : undefined;
+  return { name, input, output, errorCode, startedAt, endedAt, thinkingBefore };
 }
 
 function depthFromMeta(meta: Record<string, unknown>): number {
