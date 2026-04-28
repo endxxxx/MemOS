@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily MemOS LOCOMO OpenClaw eval (timer)
+
+[Timer]
+Unit=memos-locomo-openclaw-eval.service
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

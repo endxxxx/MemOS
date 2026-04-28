@@ -1,0 +1,26 @@
+# Example crontab entries (adjust paths and user).
+# Run as the same UNIX user that owns the OpenClaw gateway process.
+#
+# Cron time fields: minute hour day-of-month month day-of-week
+#   Examples: 0 2 * * *  = every day at 02:00 (server local time)
+#             0 */6 * * * = every 6 hours on the hour
+#
+# Create state dir once (if using default MEMOS_LOCOMO_STATE_DIR):
+#   sudo mkdir -p /var/lib/memos-locomo-eval && sudo chown "$USER" /var/lib/memos-locomo-eval
+#
+# MEMOS_EVAL_ROOT must point at the repository's evaluation/ directory.
+# MEMOS_LOCOMO_VENV is optional; use the Python env that has LOCOMO eval dependencies.
+
+# Daily at 02:00 — single host, both plugins (default profile)
+# 0 2 * * * MEMOS_EVAL_ROOT=/opt/MemOS/evaluation MEMOS_LOCOMO_VENV=/opt/venvs/memos-eval MEMOS_LOCOMO_STATE_DIR=/var/lib/memos-locomo-eval /opt/MemOS/evaluation/scripts/automation/locomo_openclaw_versioned_eval.sh >>/var/log/memos-locomo-eval.log 2>&1
+
+# Daily at 03:00 (alternative)
+# 0 3 * * * MEMOS_EVAL_ROOT=/opt/MemOS/evaluation MEMOS_LOCOMO_VENV=/opt/venvs/memos-eval MEMOS_LOCOMO_STATE_DIR=/var/lib/memos-locomo-eval /opt/MemOS/evaluation/scripts/automation/locomo_openclaw_versioned_eval.sh >>/var/log/memos-locomo-eval.log 2>&1
+
+# Two hosts: use MEMOS_LOCOMO_PROFILE and separate state files, e.g.
+# Host A (cloud only):
+#   MEMOS_LOCOMO_PROFILE=cloud MEMOS_LOCOMO_STATE_FILE=/var/lib/memos-locomo-eval/last-cloud.json ...
+# Host B (local only):
+#   MEMOS_LOCOMO_PROFILE=local MEMOS_LOCOMO_STATE_FILE=/var/lib/memos-locomo-eval/last-local.json ...
+# Host C (OpenClaw native memory-core only; triggers on OPENCLAW_NPM_PACKAGE bump, LIB=openclaw):
+#   MEMOS_LOCOMO_PROFILE=openclaw MEMOS_LOCOMO_STATE_FILE=/var/lib/memos-locomo-eval/last-openclaw.json ...
