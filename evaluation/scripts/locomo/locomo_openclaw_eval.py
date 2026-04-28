@@ -26,23 +26,6 @@ from scripts.utils.client import OpenclawClient  # noqa: E402
 
 
 def update_plugin_and_restart(client_type, **kwargs):
-    if str(client_type).lower() == "openclaw":
-        print("evaluating openclaw client, no need for plugin config update")
-        return
-    if str(client_type).lower() not in [
-        "memos-cloud",
-        "memos-local",
-        "openviking",
-        "mem0",
-        "mem9",
-        "supermemory",
-        "memorylake",
-    ]:
-        print(f"Warning: unknown client type: {client_type}, leaving all config as is")
-        return
-
-    base = "openclaw config set plugins.entries"
-
     plugin_mapping = {
         "mem0": "openclaw-mem0",
         "memos-cloud": "memos-cloud-openclaw-plugin",
@@ -53,6 +36,15 @@ def update_plugin_and_restart(client_type, **kwargs):
         "memorylake": "memorylake-openclaw",
         "honcho": "openclaw-honcho",
     }
+
+    if str(client_type).lower() == "openclaw":
+        print("evaluating openclaw client, no need for plugin config update")
+        return
+    if str(client_type).lower() not in plugin_mapping:
+        print(f"Warning: unknown client type: {client_type}, leaving all config as is")
+        return
+
+    base = "openclaw config set plugins.entries"
 
     plugin_name = plugin_mapping.get(str(client_type).lower(), str(client_type).lower())
 
