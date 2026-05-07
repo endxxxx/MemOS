@@ -8,6 +8,7 @@ VERSION="${VERSION:-default}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EVAL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$EVAL_ROOT"
+export PYTHONPATH="$EVAL_ROOT"
 
 echo "Running locomo_openclaw_eval.py..."
 python scripts/locomo/locomo_openclaw_eval.py --client_type "$LIB" --version "$VERSION"
