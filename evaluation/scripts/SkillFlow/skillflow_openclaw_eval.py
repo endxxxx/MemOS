@@ -53,7 +53,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--client_type",
         type=str,
-        choices=["openclaw", "memos-cloud", "memos-local"],
+        choices=[
+            "openclaw",
+            "memos-cloud",
+            "memos-local",
+            "honcho",
+            "byterover",
+            "supermemory",
+            "memorylake",
+            "mem9",
+            "openviking",
+            "mem0",
+        ],
         default="openclaw",
         help="OpenClaw client/plugin type to evaluate.",
     )
@@ -121,8 +132,15 @@ def require_openclaw_env() -> tuple[str, str]:
 
 def update_plugin_and_restart(client_type: str, **kwargs: Any) -> None:
     plugin_mapping = {
+        "mem0": "openclaw-mem0",
         "memos-cloud": "memos-cloud-openclaw-plugin",
         "memos-local": "memos-local-openclaw-plugin",
+        "mem9": "mem9",
+        "openviking": "openviking",
+        "supermemory": "openclaw-supermemory",
+        "memorylake": "memorylake-openclaw",
+        "honcho": "openclaw-honcho",
+        "byterover": "byterover",
     }
 
     normalized_client_type = str(client_type).lower()
@@ -436,7 +454,12 @@ def run_evaluation(
     for run_index in range(1, num_runs + 1):
         prepare_family_output_dir(task_family_path)
         agent_id = new_agent_id(client_type, version, task_family_name, run_index)
-        update_plugin_and_restart(client_type, userId=agent_id)
+        if str(client_type).lower() == "honcho":
+            update_plugin_and_restart(client_type, workspaceId=agent_id)
+        if str(client_type).lower() in ["memos-cloud", "mem0"]:
+            update_plugin_and_restart(client_type, userId=agent_id)
+        if str(client_type).lower() == "supermemory":
+            update_plugin_and_restart(client_type, containerTag=agent_id)
         client = OpenclawClient(apikey=api_key, baseurl=base_url, agent_id=agent_id)
 
         print(f"\n=== SkillFlow run {run_index}/{num_runs} | agent_id={agent_id} ===")
