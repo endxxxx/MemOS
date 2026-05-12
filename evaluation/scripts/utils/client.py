@@ -152,11 +152,12 @@ class OpenclawClient:
                     "messages": [{"role": "user", "content": query}],
                     "stream": False,
                 }
+                headers = dict(self.header)
                 if session_key:
-                    payload["session_key"] = session_key
+                    headers["x-openclaw-session-key"] = session_key
                 response = requests.post(
                     f"{self.baseurl}/v1/chat/completions",
-                    headers=self.header,
+                    headers=headers,
                     json=payload,
                 )
                 response.raise_for_status()
