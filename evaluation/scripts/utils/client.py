@@ -154,7 +154,7 @@ class OpenclawClient:
                 }
                 headers = dict(self.header)
                 if session_key:
-                    headers["x-openclaw-session-key"] = session_key
+                    headers["x-openclaw-session-key"] = f"agent:{self.agent_id}:{session_key}"
                 response = requests.post(
                     f"{self.baseurl}/v1/chat/completions",
                     headers=headers,
