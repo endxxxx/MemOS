@@ -45,6 +45,18 @@ def parse_args() -> argparse.Namespace:
         help="Number of full evaluation iterations to run.",
     )
     parser.add_argument(
+        "--num_train_set",
+        type=int,
+        default=4,
+        help="Number of easiest ranked tasks to use as the training set.",
+    )
+    parser.add_argument(
+        "--max_turns",
+        type=int,
+        default=3,
+        help="Maximum user turns per task, including the initial task prompt.",
+    )
+    parser.add_argument(
         "--version",
         type=str,
         required=True,
@@ -377,6 +389,54 @@ def summarize_agent_sessions(agent_id: str) -> dict[str, Any]:
     return stats
 
 
+SESSION_STATS_COUNTERS = (
+    "session_files",
+    "jsonl_lines",
+    "assistant_messages",
+    "assistant_messages_with_usage",
+    "assistant_messages_without_usage",
+    "tool_call_count",
+    "total_tokens",
+    "invalid_json_lines",
+)
+
+
+def session_stats_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, int]:
+    return {
+        key: numeric_usage_value(after.get(key)) - numeric_usage_value(before.get(key))
+        for key in SESSION_STATS_COUNTERS
+    }
+
+
+def usage_metrics_from_delta(delta: dict[str, Any]) -> dict[str, int]:
+    return {
+        "tool_call_count": numeric_usage_value(delta.get("tool_call_count")),
+        "total_tokens": numeric_usage_value(delta.get("total_tokens")),
+    }
+
+
+def empty_usage_metrics() -> dict[str, int]:
+    return {"tool_call_count": 0, "total_tokens": 0}
+
+
+def add_usage_metrics(target: dict[str, int], delta: dict[str, Any]) -> None:
+    target["tool_call_count"] += numeric_usage_value(delta.get("tool_call_count"))
+    target["total_tokens"] += numeric_usage_value(delta.get("total_tokens"))
+
+
+def safe_session_fragment(value: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in value)
+
+
+def build_initial_task_prompt(task_path: Path) -> str:
+    return f"阅读{task_path.resolve()}下的instruction.md并完成其中的任务"
+
+
+def build_retry_prompt(verifier_stdout: str) -> str:
+    stdout = verifier_stdout.strip() or "验证器 stdout 为空。"
+    return f"任务执行结果验证不通过，请参考下面的信息继续修改\n\n{stdout}"
+
+
 def run_task_test(task_path: Path) -> dict[str, Any]:
     clear_verifier_artifacts(task_path)
     test_script = task_path / "tests" / "test.sh"
@@ -411,45 +471,130 @@ def run_task_test(task_path: Path) -> dict[str, Any]:
     }
 
 
-def run_task(client: OpenclawClient, task_path: Path, agent_id: str) -> dict[str, Any]:
+def run_task(
+    client: OpenclawClient,
+    task_path: Path,
+    agent_id: str,
+    session_key: str,
+    max_turns: int,
+    split: str,
+    train_round: int | None = None,
+) -> dict[str, Any]:
     task_output_dir(task_path).mkdir(parents=True, exist_ok=True)
     remove_task_outputs(task_path)
-    openclaw_query = f"阅读{task_path.resolve()}下的instruction.md并完成其中的任务"
+    openclaw_query = build_initial_task_prompt(task_path)
+    current_query = openclaw_query
+    attempts: list[dict[str, Any]] = []
+    aggregate_usage = empty_usage_metrics()
 
-    started_at = time.time()
-    search_response = client.search(query=openclaw_query, user_id=agent_id, top_k=0)
-    openclaw_duration_ms = (time.time() - started_at) * 1000
+    for turn_index in range(1, max_turns + 1):
+        before_stats = summarize_agent_sessions(agent_id)
+        started_at = time.time()
+        search_response = client.search(
+            query=current_query,
+            user_id=agent_id,
+            top_k=0,
+            session_key=session_key,
+        )
+        openclaw_duration_ms = (time.time() - started_at) * 1000
+        after_stats = summarize_agent_sessions(agent_id)
+        stats_delta = session_stats_delta(before_stats, after_stats)
+        add_usage_metrics(aggregate_usage, stats_delta)
 
-    test_result = run_task_test(task_path)
+        test_result = run_task_test(task_path)
+        attempts.append(
+            {
+                "turn_index": turn_index,
+                "prompt": current_query,
+                "openclaw_duration_ms": openclaw_duration_ms,
+                "openclaw_response": search_response,
+                "session_stats_delta": stats_delta,
+                "usage": usage_metrics_from_delta(stats_delta),
+                "test": test_result,
+                "success": bool(test_result["success"]),
+            }
+        )
+
+        if test_result["success"] or turn_index >= max_turns:
+            break
+        current_query = build_retry_prompt(str(test_result.get("stdout", "")))
+
+    final_test_result = attempts[-1]["test"] if attempts else None
+    success = bool(final_test_result and final_test_result["success"])
 
     return {
         "task_name": task_path.name,
         "task_path": str(task_path),
         "instruction_path": str(task_path / "instruction.md"),
+        "split": split,
+        "train_round": train_round,
+        "session_key": session_key,
+        "max_turns": max_turns,
+        "turns_used": len(attempts),
+        "user_agent_interactions": len(attempts),
         "openclaw_query": openclaw_query,
-        "openclaw_duration_ms": openclaw_duration_ms,
-        "openclaw_response": search_response,
-        "test": test_result,
-        "success": bool(test_result["success"]),
+        "usage": aggregate_usage,
+        "attempts": attempts,
+        "test": final_test_result,
+        "success": success,
     }
 
 
+def failed_task_result(
+    task_path: Path,
+    split: str,
+    session_key: str,
+    max_turns: int,
+    error: str,
+    train_round: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "task_name": task_path.name,
+        "task_path": str(task_path),
+        "instruction_path": str(task_path / "instruction.md"),
+        "split": split,
+        "train_round": train_round,
+        "session_key": session_key,
+        "max_turns": max_turns,
+        "turns_used": 0,
+        "user_agent_interactions": 0,
+        "usage": empty_usage_metrics(),
+        "attempts": [],
+        "test": None,
+        "success": False,
+        "error": error,
+    }
+
+
+def average(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
 def run_evaluation(
-    task_family_name: str, num_runs: int, version: str, client_type: str
+    task_family_name: str,
+    num_runs: int,
+    version: str,
+    client_type: str,
+    num_train_set: int,
+    max_turns: int,
 ) -> dict[str, Any]:
     if num_runs <= 0:
         raise ValueError("--num_runs must be a positive integer")
+    if max_turns <= 0:
+        raise ValueError("--max_turns must be a positive integer")
 
     load_dotenv()
     api_key, base_url = require_openclaw_env()
     task_family_path = resolve_task_family_path(task_family_name)
     tasks = load_task_order(task_family_path)
+    if num_train_set < 0 or num_train_set >= len(tasks):
+        raise ValueError(
+            "--num_train_set must be greater than or equal to 0 and less than the number of tasks"
+        )
 
+    train_tasks = tasks[:num_train_set]
+    test_tasks = tasks[num_train_set:]
     runs = []
-    total_successes = 0
-    total_attempts = num_runs * len(tasks)
-    total_tool_calls = 0
-    total_tokens = 0
 
     for run_index in range(1, num_runs + 1):
         prepare_family_output_dir(task_family_path)
@@ -463,56 +608,157 @@ def run_evaluation(
         client = OpenclawClient(apikey=api_key, baseurl=base_url, agent_id=agent_id)
 
         print(f"\n=== SkillFlow run {run_index}/{num_runs} | agent_id={agent_id} ===")
-        task_results = []
-        run_successes = 0
+        train_session_key = safe_session_fragment(f"{agent_id}_train")
+        train_rounds: dict[str, list[dict[str, Any]]] = {"1": [], "2": []}
+        train_round_metrics = {
+            "1": empty_usage_metrics(),
+            "2": empty_usage_metrics(),
+        }
+        test_results = []
+        test_successes = 0
+        test_usage = empty_usage_metrics()
+        test_interactions = 0
 
-        for task_index, task_path in enumerate(tasks, start=1):
-            print(f"[run {run_index}] task {task_index}/{len(tasks)}: {task_path.name}")
+        for train_round in (1, 2):
+            for task_index, task_path in enumerate(train_tasks, start=1):
+                print(
+                    f"[run {run_index}] train round {train_round}/2 "
+                    f"task {task_index}/{len(train_tasks)}: {task_path.name}"
+                )
+                try:
+                    task_result = run_task(
+                        client=client,
+                        task_path=task_path,
+                        agent_id=agent_id,
+                        session_key=train_session_key,
+                        max_turns=max_turns,
+                        split="train",
+                        train_round=train_round,
+                    )
+                except Exception as exc:
+                    task_result = failed_task_result(
+                        task_path=task_path,
+                        split="train",
+                        session_key=train_session_key,
+                        max_turns=max_turns,
+                        error=str(exc),
+                        train_round=train_round,
+                    )
+                add_usage_metrics(train_round_metrics[str(train_round)], task_result["usage"])
+                train_rounds[str(train_round)].append(task_result)
+
+        for task_index, task_path in enumerate(test_tasks, start=1):
+            session_key = safe_session_fragment(f"{agent_id}_test_{task_index}")
+            print(f"[run {run_index}] test task {task_index}/{len(test_tasks)}: {task_path.name}")
             try:
-                task_result = run_task(client, task_path, agent_id)
+                task_result = run_task(
+                    client=client,
+                    task_path=task_path,
+                    agent_id=agent_id,
+                    session_key=session_key,
+                    max_turns=max_turns,
+                    split="test",
+                )
             except Exception as exc:
-                task_result = {
-                    "task_name": task_path.name,
-                    "task_path": str(task_path),
-                    "instruction_path": str(task_path / "instruction.md"),
-                    "success": False,
-                    "error": str(exc),
-                }
+                task_result = failed_task_result(
+                    task_path=task_path,
+                    split="test",
+                    session_key=session_key,
+                    max_turns=max_turns,
+                    error=str(exc),
+                )
 
             if task_result["success"]:
-                run_successes += 1
-                total_successes += 1
-            task_results.append(task_result)
+                test_successes += 1
+            add_usage_metrics(test_usage, task_result["usage"])
+            test_interactions += numeric_usage_value(task_result.get("user_agent_interactions"))
+            test_results.append(task_result)
 
-        run_completion_rate = run_successes / len(tasks)
+        test_attempts = len(test_tasks)
+        test_completion_rate = test_successes / test_attempts if test_attempts else 0.0
+        run_metrics = {
+            "test_completion_rate": test_completion_rate,
+            "train_round_1": train_round_metrics["1"],
+            "train_round_2": train_round_metrics["2"],
+            "test": {
+                "successes": test_successes,
+                "attempts": test_attempts,
+                "completion_rate": test_completion_rate,
+                "total_tool_call_count": test_usage["tool_call_count"],
+                "total_tokens": test_usage["total_tokens"],
+                "total_user_agent_interactions": test_interactions,
+                "avg_tool_call_count_per_task": (
+                    test_usage["tool_call_count"] / test_attempts if test_attempts else 0.0
+                ),
+                "avg_tokens_per_task": (
+                    test_usage["total_tokens"] / test_attempts if test_attempts else 0.0
+                ),
+                "avg_interactions_per_task": (
+                    test_interactions / test_attempts if test_attempts else 0.0
+                ),
+            },
+        }
         agent_session_stats = summarize_agent_sessions(agent_id)
-        run_tool_calls = int(agent_session_stats["tool_call_count"])
-        run_total_tokens = int(agent_session_stats["total_tokens"])
-        total_tool_calls += run_tool_calls
-        total_tokens += run_total_tokens
         runs.append(
             {
                 "run_index": run_index,
                 "agent_id": agent_id,
-                "successes": run_successes,
-                "attempts": len(tasks),
-                "completion_rate": run_completion_rate,
-                "tool_call_count": run_tool_calls,
-                "total_tokens": run_total_tokens,
+                "train_session_key": train_session_key,
+                "metrics": run_metrics,
                 "agent_session_stats": agent_session_stats,
-                "tasks": task_results,
+                "train_rounds": train_rounds,
+                "test_tasks": test_results,
             }
         )
         print(
-            f"[run {run_index}] completion_rate={run_completion_rate:.4f} "
-            f"tool_calls={run_tool_calls} total_tokens={run_total_tokens}"
+            f"[run {run_index}] test_completion_rate={test_completion_rate:.4f} "
+            f"train_r1_tool_calls={train_round_metrics['1']['tool_call_count']} "
+            f"train_r2_tool_calls={train_round_metrics['2']['tool_call_count']} "
+            f"test_avg_tool_calls={run_metrics['test']['avg_tool_call_count_per_task']:.2f}"
         )
 
-    average_completion_rate = (
-        sum(run["completion_rate"] for run in runs) / len(runs) if runs else 0.0
+    total_test_tasks = len(test_tasks) * len(runs)
+    aggregate_test_tool_calls = sum(
+        numeric_usage_value(run["metrics"]["test"]["total_tool_call_count"]) for run in runs
     )
-    average_tool_calls_per_run = total_tool_calls / len(runs) if runs else 0.0
-    average_tokens_per_run = total_tokens / len(runs) if runs else 0.0
+    aggregate_test_tokens = sum(
+        numeric_usage_value(run["metrics"]["test"]["total_tokens"]) for run in runs
+    )
+    aggregate_test_interactions = sum(
+        numeric_usage_value(run["metrics"]["test"]["total_user_agent_interactions"]) for run in runs
+    )
+    metrics = {
+        "average_test_completion_rate": average(
+            [float(run["metrics"]["test_completion_rate"]) for run in runs]
+        ),
+        "train_round_1": {
+            "average_tool_call_count_per_run": average(
+                [float(run["metrics"]["train_round_1"]["tool_call_count"]) for run in runs]
+            ),
+            "average_tokens_per_run": average(
+                [float(run["metrics"]["train_round_1"]["total_tokens"]) for run in runs]
+            ),
+        },
+        "train_round_2": {
+            "average_tool_call_count_per_run": average(
+                [float(run["metrics"]["train_round_2"]["tool_call_count"]) for run in runs]
+            ),
+            "average_tokens_per_run": average(
+                [float(run["metrics"]["train_round_2"]["total_tokens"]) for run in runs]
+            ),
+        },
+        "test": {
+            "avg_tool_call_count_per_task": (
+                aggregate_test_tool_calls / total_test_tasks if total_test_tasks else 0.0
+            ),
+            "avg_tokens_per_task": (
+                aggregate_test_tokens / total_test_tasks if total_test_tasks else 0.0
+            ),
+            "avg_interactions_per_task": (
+                aggregate_test_interactions / total_test_tasks if total_test_tasks else 0.0
+            ),
+        },
+    }
 
     return {
         "metadata": {
@@ -526,15 +772,15 @@ def run_evaluation(
             "created_at": datetime.now(timezone.utc).isoformat(),
         },
         "task_order": [task.name for task in tasks],
+        "train_task_order": [task.name for task in train_tasks],
+        "test_task_order": [task.name for task in test_tasks],
         "num_runs": num_runs,
+        "num_train_set": num_train_set,
+        "max_turns": max_turns,
         "num_tasks": len(tasks),
-        "total_successes": total_successes,
-        "total_attempts": total_attempts,
-        "average_completion_rate": average_completion_rate,
-        "total_tool_calls": total_tool_calls,
-        "average_tool_calls_per_run": average_tool_calls_per_run,
-        "total_tokens": total_tokens,
-        "average_tokens_per_run": average_tokens_per_run,
+        "num_train_tasks": len(train_tasks),
+        "num_test_tasks": len(test_tasks),
+        "metrics": metrics,
         "runs": runs,
     }
 
@@ -562,13 +808,29 @@ def main() -> None:
         num_runs=args.num_runs,
         version=args.version,
         client_type=args.client_type,
+        num_train_set=args.num_train_set,
+        max_turns=args.max_turns,
     )
     output_path = save_results(results, args.version, args.client_type, args.task_family_name)
 
     print("\n=== SkillFlow OpenClaw Evaluation Complete ===")
-    print(f"Average completion rate: {results['average_completion_rate']:.4f}")
-    print(f"Average tool calls per run: {results['average_tool_calls_per_run']:.2f}")
-    print(f"Average tokens per run: {results['average_tokens_per_run']:.2f}")
+    print(f"Average test completion rate: {results['metrics']['average_test_completion_rate']:.4f}")
+    print(
+        "Train round 1 average tool calls/tokens per run: "
+        f"{results['metrics']['train_round_1']['average_tool_call_count_per_run']:.2f}/"
+        f"{results['metrics']['train_round_1']['average_tokens_per_run']:.2f}"
+    )
+    print(
+        "Train round 2 average tool calls/tokens per run: "
+        f"{results['metrics']['train_round_2']['average_tool_call_count_per_run']:.2f}/"
+        f"{results['metrics']['train_round_2']['average_tokens_per_run']:.2f}"
+    )
+    print(
+        "Test averages per task tool calls/tokens/interactions: "
+        f"{results['metrics']['test']['avg_tool_call_count_per_task']:.2f}/"
+        f"{results['metrics']['test']['avg_tokens_per_task']:.2f}/"
+        f"{results['metrics']['test']['avg_interactions_per_task']:.2f}"
+    )
     print(f"Results saved to: {output_path}")
 
 

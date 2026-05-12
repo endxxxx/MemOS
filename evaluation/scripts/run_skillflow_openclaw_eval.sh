@@ -7,6 +7,8 @@ CLIENT_TYPE="${CLIENT_TYPE:-openclaw}"
 VERSION="${VERSION:-default}"
 TASK_FAMILY_NAME="${TASK_FAMILY_NAME:-HWPX-Document-Automation}"
 NUM_RUNS="${NUM_RUNS:-1}"
+NUM_TRAIN_SET="${NUM_TRAIN_SET:-4}"
+MAX_TURNS="${MAX_TURNS:-3}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EVAL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -17,6 +19,8 @@ echo "Running skillflow_openclaw_eval.py..."
 python3 scripts/SkillFlow/skillflow_openclaw_eval.py \
   --task_family_name "$TASK_FAMILY_NAME" \
   --num_runs "$NUM_RUNS" \
+  --num_train_set "$NUM_TRAIN_SET" \
+  --max_turns "$MAX_TURNS" \
   --version "$VERSION" \
   --client_type "$CLIENT_TYPE"
 

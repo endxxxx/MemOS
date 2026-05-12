@@ -143,7 +143,7 @@ class OpenclawClient:
                 except Exception:
                     continue
 
-    def search(self, query, user_id, top_k):
+    def search(self, query, user_id, top_k, session_key=None):
         max_retries = 5
         for attempt in range(max_retries):
             try:
@@ -152,6 +152,8 @@ class OpenclawClient:
                     "messages": [{"role": "user", "content": query}],
                     "stream": False,
                 }
+                if session_key:
+                    payload["session_key"] = session_key
                 response = requests.post(
                     f"{self.baseurl}/v1/chat/completions",
                     headers=self.header,
