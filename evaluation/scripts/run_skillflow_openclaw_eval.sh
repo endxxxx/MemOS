@@ -10,6 +10,7 @@ NUM_RUNS="${NUM_RUNS:-1}"
 NUM_TRAIN_SET="${NUM_TRAIN_SET:-4}"
 TRAIN_MAX_TURNS="${TRAIN_MAX_TURNS:-3}"
 TEST_MAX_TURNS="${TEST_MAX_TURNS:-1}"
+ONLY_TEST="${ONLY_TEST:-false}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EVAL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -24,6 +25,7 @@ python3 scripts/SkillFlow/skillflow_openclaw_eval.py \
   --train_max_turns "$TRAIN_MAX_TURNS" \
   --test_max_turns "$TEST_MAX_TURNS" \
   --version "$VERSION" \
-  --client_type "$CLIENT_TYPE"
+  --client_type "$CLIENT_TYPE" \
+  $(if [[ "$ONLY_TEST" == "true" || "$ONLY_TEST" == "1" ]]; then echo "--only_test"; fi)
 
 echo "SkillFlow OpenClaw evaluation completed successfully!"

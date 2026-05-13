@@ -64,6 +64,11 @@ def parse_args() -> argparse.Namespace:
         help="Maximum user turns per test task, including the initial task prompt.",
     )
     parser.add_argument(
+        "--only_test",
+        action="store_true",
+        help="Skip training rounds and run only the test-set tasks.",
+    )
+    parser.add_argument(
         "--version",
         type=str,
         required=True,
@@ -314,6 +319,15 @@ def remove_task_outputs(task_path: Path) -> None:
         if output_path.exists() and (output_path.is_file() or output_path.is_symlink()):
             with suppress(OSError):
                 output_path.unlink()
+
+
+def list_task_output_files(task_path: Path) -> list[str]:
+    output_dir = task_output_dir(task_path)
+    if not output_dir.is_dir():
+        return []
+    return sorted(
+        str(path) for path in output_dir.rglob("*") if path.is_file() or path.is_symlink()
+    )
 
 
 def numeric_usage_value(value: Any) -> int:
@@ -583,6 +597,79 @@ def average(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def run_test_task_with_output_check(
+    client: OpenclawClient,
+    task_path: Path,
+    agent_id: str,
+    base_session_key: str,
+    max_turns: int,
+) -> dict[str, Any]:
+    task_result = run_task(
+        client=client,
+        task_path=task_path,
+        agent_id=agent_id,
+        session_key=base_session_key,
+        max_turns=max_turns,
+        split="test",
+    )
+    output_files = list_task_output_files(task_path)
+    task_result["output_check"] = {
+        "output_dir": str(task_output_dir(task_path)),
+        "files": output_files,
+        "file_count": len(output_files),
+        "rerun_due_to_empty_output": False,
+    }
+    initial_execution = dict(task_result)
+    task_result["executions"] = [initial_execution]
+
+    if output_files:
+        return task_result
+
+    rerun_session_key = f"{base_session_key}_rerun_1"
+    try:
+        rerun_result = run_task(
+            client=client,
+            task_path=task_path,
+            agent_id=agent_id,
+            session_key=rerun_session_key,
+            max_turns=max_turns,
+            split="test",
+        )
+    except Exception as exc:
+        rerun_result = failed_task_result(
+            task_path=task_path,
+            split="test",
+            session_key=rerun_session_key,
+            max_turns=max_turns,
+            error=str(exc),
+        )
+    rerun_output_files = list_task_output_files(task_path)
+    combined_usage = empty_usage_metrics()
+    add_usage_metrics(combined_usage, task_result["usage"])
+    add_usage_metrics(combined_usage, rerun_result["usage"])
+
+    rerun_result["output_check"] = {
+        "output_dir": str(task_output_dir(task_path)),
+        "files": rerun_output_files,
+        "file_count": len(rerun_output_files),
+        "rerun_due_to_empty_output": True,
+    }
+    rerun_execution = dict(rerun_result)
+    rerun_result["executions"] = [initial_execution, rerun_execution]
+    rerun_result["usage"] = combined_usage
+    rerun_result["turns_used"] = numeric_usage_value(
+        task_result.get("turns_used")
+    ) + numeric_usage_value(rerun_result.get("turns_used"))
+    rerun_result["user_agent_interactions"] = numeric_usage_value(
+        task_result.get("user_agent_interactions")
+    ) + numeric_usage_value(rerun_result.get("user_agent_interactions"))
+    rerun_result["output_check"]["initial_files"] = output_files
+    rerun_result["output_check"]["final_files"] = rerun_output_files
+    rerun_result["output_check"]["initial_session_key"] = base_session_key
+    rerun_result["output_check"]["rerun_session_key"] = rerun_session_key
+    return rerun_result
+
+
 def run_evaluation(
     task_family_name: str,
     num_runs: int,
@@ -591,6 +678,7 @@ def run_evaluation(
     num_train_set: int,
     train_max_turns: int,
     test_max_turns: int,
+    only_test: bool,
 ) -> dict[str, Any]:
     if num_runs <= 0:
         raise ValueError("--num_runs must be a positive integer")
@@ -636,45 +724,45 @@ def run_evaluation(
         test_usage = empty_usage_metrics()
         test_interactions = 0
 
-        for train_round in (1, 2):
-            for task_index, task_path in enumerate(train_tasks, start=1):
-                print(
-                    f"[run {run_index}] train round {train_round}/2 "
-                    f"task {task_index}/{len(train_tasks)}: {task_path.name}"
-                )
-                try:
-                    task_result = run_task(
-                        client=client,
-                        task_path=task_path,
-                        agent_id=agent_id,
-                        session_key=train_session_key,
-                        max_turns=train_max_turns,
-                        split="train",
-                        train_round=train_round,
+        if not only_test:
+            for train_round in (1, 2):
+                for task_index, task_path in enumerate(train_tasks, start=1):
+                    print(
+                        f"[run {run_index}] train round {train_round}/2 "
+                        f"task {task_index}/{len(train_tasks)}: {task_path.name}"
                     )
-                except Exception as exc:
-                    task_result = failed_task_result(
-                        task_path=task_path,
-                        split="train",
-                        session_key=train_session_key,
-                        max_turns=train_max_turns,
-                        error=str(exc),
-                        train_round=train_round,
-                    )
-                add_usage_metrics(train_round_metrics[str(train_round)], task_result["usage"])
-                train_rounds[str(train_round)].append(task_result)
+                    try:
+                        task_result = run_task(
+                            client=client,
+                            task_path=task_path,
+                            agent_id=agent_id,
+                            session_key=train_session_key,
+                            max_turns=train_max_turns,
+                            split="train",
+                            train_round=train_round,
+                        )
+                    except Exception as exc:
+                        task_result = failed_task_result(
+                            task_path=task_path,
+                            split="train",
+                            session_key=train_session_key,
+                            max_turns=train_max_turns,
+                            error=str(exc),
+                            train_round=train_round,
+                        )
+                    add_usage_metrics(train_round_metrics[str(train_round)], task_result["usage"])
+                    train_rounds[str(train_round)].append(task_result)
 
         for task_index, task_path in enumerate(test_tasks, start=1):
             session_key = safe_session_fragment(f"{agent_id}_test_{task_index}")
             print(f"[run {run_index}] test task {task_index}/{len(test_tasks)}: {task_path.name}")
             try:
-                task_result = run_task(
+                task_result = run_test_task_with_output_check(
                     client=client,
                     task_path=task_path,
                     agent_id=agent_id,
-                    session_key=session_key,
+                    base_session_key=session_key,
                     max_turns=test_max_turns,
-                    split="test",
                 )
             except Exception as exc:
                 task_result = failed_task_result(
@@ -795,6 +883,7 @@ def run_evaluation(
         "num_train_set": num_train_set,
         "train_max_turns": train_max_turns,
         "test_max_turns": test_max_turns,
+        "only_test": only_test,
         "num_tasks": len(tasks),
         "num_train_tasks": len(train_tasks),
         "num_test_tasks": len(test_tasks),
@@ -829,6 +918,7 @@ def main() -> None:
         num_train_set=args.num_train_set,
         train_max_turns=args.train_max_turns,
         test_max_turns=args.test_max_turns,
+        only_test=args.only_test,
     )
     output_path = save_results(results, args.version, args.client_type, args.task_family_name)
 
