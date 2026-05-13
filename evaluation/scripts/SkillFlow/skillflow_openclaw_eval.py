@@ -28,6 +28,7 @@ RANKING_FILE = "ALL_TASK_DIFFICULTY_RANKING.json"
 SKILLFLOW_DATA_ROOT = Path("/root/SkillFlow_Data")
 SKILLFLOW_OUTPUT_ROOT = Path("/root/SkillFlow_Outputs")
 OPENCLAW_AGENTS_ROOT = Path("/root/.openclaw/agents")
+TASK_FAMILY_PERMISSION_MODE = 0o755
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,6 +91,12 @@ def resolve_task_family_path(task_family_name: str) -> Path:
             f"Task family '{task_family_name}' not found under {SKILLFLOW_DATA_ROOT}"
         )
     return task_family_path
+
+
+def chmod_task_family_path(task_family_path: Path) -> None:
+    task_family_path.chmod(TASK_FAMILY_PERMISSION_MODE)
+    for path in task_family_path.rglob("*"):
+        path.chmod(TASK_FAMILY_PERMISSION_MODE)
 
 
 def load_task_order(task_family_path: Path) -> list[Path]:
@@ -597,6 +604,7 @@ def run_evaluation(
     runs = []
 
     for run_index in range(1, num_runs + 1):
+        chmod_task_family_path(task_family_path)
         prepare_family_output_dir(task_family_path)
         agent_id = new_agent_id(client_type, version, task_family_name, run_index)
         if str(client_type).lower() == "honcho":
