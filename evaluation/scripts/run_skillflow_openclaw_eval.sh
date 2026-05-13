@@ -8,7 +8,8 @@ VERSION="${VERSION:-default}"
 TASK_FAMILY_NAME="${TASK_FAMILY_NAME:-HWPX-Document-Automation}"
 NUM_RUNS="${NUM_RUNS:-1}"
 NUM_TRAIN_SET="${NUM_TRAIN_SET:-4}"
-MAX_TURNS="${MAX_TURNS:-3}"
+TRAIN_MAX_TURNS="${TRAIN_MAX_TURNS:-3}"
+TEST_MAX_TURNS="${TEST_MAX_TURNS:-1}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EVAL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -20,7 +21,8 @@ python3 scripts/SkillFlow/skillflow_openclaw_eval.py \
   --task_family_name "$TASK_FAMILY_NAME" \
   --num_runs "$NUM_RUNS" \
   --num_train_set "$NUM_TRAIN_SET" \
-  --max_turns "$MAX_TURNS" \
+  --train_max_turns "$TRAIN_MAX_TURNS" \
+  --test_max_turns "$TEST_MAX_TURNS" \
   --version "$VERSION" \
   --client_type "$CLIENT_TYPE"
 

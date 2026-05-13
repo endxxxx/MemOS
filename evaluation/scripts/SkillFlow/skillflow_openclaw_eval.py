@@ -52,10 +52,16 @@ def parse_args() -> argparse.Namespace:
         help="Number of easiest ranked tasks to use as the training set.",
     )
     parser.add_argument(
-        "--max_turns",
+        "--train_max_turns",
         type=int,
         default=3,
-        help="Maximum user turns per task, including the initial task prompt.",
+        help="Maximum user turns per training task, including the initial task prompt.",
+    )
+    parser.add_argument(
+        "--test_max_turns",
+        type=int,
+        default=1,
+        help="Maximum user turns per test task, including the initial task prompt.",
     )
     parser.add_argument(
         "--version",
@@ -583,12 +589,15 @@ def run_evaluation(
     version: str,
     client_type: str,
     num_train_set: int,
-    max_turns: int,
+    train_max_turns: int,
+    test_max_turns: int,
 ) -> dict[str, Any]:
     if num_runs <= 0:
         raise ValueError("--num_runs must be a positive integer")
-    if max_turns <= 0:
-        raise ValueError("--max_turns must be a positive integer")
+    if train_max_turns <= 0:
+        raise ValueError("--train_max_turns must be a positive integer")
+    if test_max_turns <= 0:
+        raise ValueError("--test_max_turns must be a positive integer")
 
     load_dotenv()
     api_key, base_url = require_openclaw_env()
@@ -639,7 +648,7 @@ def run_evaluation(
                         task_path=task_path,
                         agent_id=agent_id,
                         session_key=train_session_key,
-                        max_turns=max_turns,
+                        max_turns=train_max_turns,
                         split="train",
                         train_round=train_round,
                     )
@@ -648,7 +657,7 @@ def run_evaluation(
                         task_path=task_path,
                         split="train",
                         session_key=train_session_key,
-                        max_turns=max_turns,
+                        max_turns=train_max_turns,
                         error=str(exc),
                         train_round=train_round,
                     )
@@ -664,7 +673,7 @@ def run_evaluation(
                     task_path=task_path,
                     agent_id=agent_id,
                     session_key=session_key,
-                    max_turns=max_turns,
+                    max_turns=test_max_turns,
                     split="test",
                 )
             except Exception as exc:
@@ -672,7 +681,7 @@ def run_evaluation(
                     task_path=task_path,
                     split="test",
                     session_key=session_key,
-                    max_turns=max_turns,
+                    max_turns=test_max_turns,
                     error=str(exc),
                 )
 
@@ -784,7 +793,8 @@ def run_evaluation(
         "test_task_order": [task.name for task in test_tasks],
         "num_runs": num_runs,
         "num_train_set": num_train_set,
-        "max_turns": max_turns,
+        "train_max_turns": train_max_turns,
+        "test_max_turns": test_max_turns,
         "num_tasks": len(tasks),
         "num_train_tasks": len(train_tasks),
         "num_test_tasks": len(test_tasks),
@@ -817,7 +827,8 @@ def main() -> None:
         version=args.version,
         client_type=args.client_type,
         num_train_set=args.num_train_set,
-        max_turns=args.max_turns,
+        train_max_turns=args.train_max_turns,
+        test_max_turns=args.test_max_turns,
     )
     output_path = save_results(results, args.version, args.client_type, args.task_family_name)
 
