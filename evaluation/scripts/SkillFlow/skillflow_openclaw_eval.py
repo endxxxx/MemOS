@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
         "--num_runs",
         type=int,
         default=1,
-        help="Number of full evaluation iterations to run.",
+        help="Number of test-set evaluation iterations to run after the fixed training pass.",
     )
     parser.add_argument(
         "--num_train_set",
@@ -207,6 +207,20 @@ def update_plugin_and_restart(client_type: str, **kwargs: Any) -> None:
 
 def new_agent_id(client_type: str, version: str, task_family_name: str, run_index: int) -> str:
     return f"sf_{client_type}_{version}_{task_family_name.lower()[:10]}_run_{run_index}"
+
+
+def new_training_agent_id(client_type: str, version: str, task_family_name: str) -> str:
+    return f"sf_{client_type}_{version}_{task_family_name.lower()[:10]}_train"
+
+
+def configure_plugin_for_agent(client_type: str, agent_id: str) -> None:
+    normalized_client_type = str(client_type).lower()
+    if normalized_client_type == "honcho":
+        update_plugin_and_restart(client_type, workspaceId=agent_id)
+    if normalized_client_type in ["memos-cloud", "mem0"]:
+        update_plugin_and_restart(client_type, userId=agent_id)
+    if normalized_client_type == "supermemory":
+        update_plugin_and_restart(client_type, containerTag=agent_id)
 
 
 def read_instruction(task_path: Path) -> str:
@@ -699,62 +713,87 @@ def run_evaluation(
     train_tasks = tasks[:num_train_set]
     test_tasks = tasks[num_train_set:]
     runs = []
+    train_rounds: dict[str, list[dict[str, Any]]] = {"1": [], "2": []}
+    train_round_metrics = {
+        "1": empty_usage_metrics(),
+        "2": empty_usage_metrics(),
+    }
+    trained_agent_id: str | None = None
+    train_session_key: str | None = None
+    training: dict[str, Any] | None = None
+
+    if not only_test:
+        chmod_task_family_path(task_family_path)
+        prepare_family_output_dir(task_family_path)
+        trained_agent_id = new_training_agent_id(client_type, version, task_family_name)
+        configure_plugin_for_agent(client_type, trained_agent_id)
+        train_client = OpenclawClient(
+            apikey=api_key,
+            baseurl=base_url,
+            agent_id=trained_agent_id,
+        )
+
+        print(f"\n=== SkillFlow training | agent_id={trained_agent_id} ===")
+        train_session_key = safe_session_fragment(f"{trained_agent_id}_train")
+        for train_round in (1, 2):
+            for task_index, task_path in enumerate(train_tasks, start=1):
+                print(
+                    f"[train] round {train_round}/2 "
+                    f"task {task_index}/{len(train_tasks)}: {task_path.name}"
+                )
+                try:
+                    task_result = run_task(
+                        client=train_client,
+                        task_path=task_path,
+                        agent_id=trained_agent_id,
+                        session_key=train_session_key,
+                        max_turns=train_max_turns,
+                        split="train",
+                        train_round=train_round,
+                    )
+                except Exception as exc:
+                    task_result = failed_task_result(
+                        task_path=task_path,
+                        split="train",
+                        session_key=train_session_key,
+                        max_turns=train_max_turns,
+                        error=str(exc),
+                        train_round=train_round,
+                    )
+                add_usage_metrics(train_round_metrics[str(train_round)], task_result["usage"])
+                train_rounds[str(train_round)].append(task_result)
+
+        training = {
+            "agent_id": trained_agent_id,
+            "train_session_key": train_session_key,
+            "metrics": {
+                "train_round_1": train_round_metrics["1"],
+                "train_round_2": train_round_metrics["2"],
+            },
+            "agent_session_stats": summarize_agent_sessions(trained_agent_id),
+            "train_rounds": train_rounds,
+        }
+        print(
+            "[train] complete "
+            f"round_1_tool_calls={train_round_metrics['1']['tool_call_count']} "
+            f"round_2_tool_calls={train_round_metrics['2']['tool_call_count']}"
+        )
 
     for run_index in range(1, num_runs + 1):
         chmod_task_family_path(task_family_path)
         prepare_family_output_dir(task_family_path)
         agent_id = new_agent_id(client_type, version, task_family_name, run_index)
-        if str(client_type).lower() == "honcho":
-            update_plugin_and_restart(client_type, workspaceId=agent_id)
-        if str(client_type).lower() in ["memos-cloud", "mem0"]:
-            update_plugin_and_restart(client_type, userId=agent_id)
-        if str(client_type).lower() == "supermemory":
-            update_plugin_and_restart(client_type, containerTag=agent_id)
+        configure_plugin_for_agent(client_type, agent_id)
         client = OpenclawClient(apikey=api_key, baseurl=base_url, agent_id=agent_id)
 
-        print(f"\n=== SkillFlow run {run_index}/{num_runs} | agent_id={agent_id} ===")
-        train_session_key = safe_session_fragment(f"{agent_id}_train")
-        train_rounds: dict[str, list[dict[str, Any]]] = {"1": [], "2": []}
-        train_round_metrics = {
-            "1": empty_usage_metrics(),
-            "2": empty_usage_metrics(),
-        }
+        print(f"\n=== SkillFlow test run {run_index}/{num_runs} | agent_id={agent_id} ===")
         test_results = []
         test_successes = 0
         test_usage = empty_usage_metrics()
         test_interactions = 0
 
-        if not only_test:
-            for train_round in (1, 2):
-                for task_index, task_path in enumerate(train_tasks, start=1):
-                    print(
-                        f"[run {run_index}] train round {train_round}/2 "
-                        f"task {task_index}/{len(train_tasks)}: {task_path.name}"
-                    )
-                    try:
-                        task_result = run_task(
-                            client=client,
-                            task_path=task_path,
-                            agent_id=agent_id,
-                            session_key=train_session_key,
-                            max_turns=train_max_turns,
-                            split="train",
-                            train_round=train_round,
-                        )
-                    except Exception as exc:
-                        task_result = failed_task_result(
-                            task_path=task_path,
-                            split="train",
-                            session_key=train_session_key,
-                            max_turns=train_max_turns,
-                            error=str(exc),
-                            train_round=train_round,
-                        )
-                    add_usage_metrics(train_round_metrics[str(train_round)], task_result["usage"])
-                    train_rounds[str(train_round)].append(task_result)
-
         for task_index, task_path in enumerate(test_tasks, start=1):
-            session_key = safe_session_fragment(f"{agent_id}_test_{task_index}")
+            session_key = safe_session_fragment(f"{agent_id}_test_run_{run_index}_{task_index}")
             print(f"[run {run_index}] test task {task_index}/{len(test_tasks)}: {task_path.name}")
             try:
                 task_result = run_test_task_with_output_check(
@@ -783,8 +822,6 @@ def run_evaluation(
         test_completion_rate = test_successes / test_attempts if test_attempts else 0.0
         run_metrics = {
             "test_completion_rate": test_completion_rate,
-            "train_round_1": train_round_metrics["1"],
-            "train_round_2": train_round_metrics["2"],
             "test": {
                 "successes": test_successes,
                 "attempts": test_attempts,
@@ -808,17 +845,14 @@ def run_evaluation(
             {
                 "run_index": run_index,
                 "agent_id": agent_id,
-                "train_session_key": train_session_key,
+                "training_agent_id": trained_agent_id,
                 "metrics": run_metrics,
                 "agent_session_stats": agent_session_stats,
-                "train_rounds": train_rounds,
                 "test_tasks": test_results,
             }
         )
         print(
             f"[run {run_index}] test_completion_rate={test_completion_rate:.4f} "
-            f"train_r1_tool_calls={train_round_metrics['1']['tool_call_count']} "
-            f"train_r2_tool_calls={train_round_metrics['2']['tool_call_count']} "
             f"test_avg_tool_calls={run_metrics['test']['avg_tool_call_count_per_task']:.2f}"
         )
 
@@ -832,25 +866,46 @@ def run_evaluation(
     aggregate_test_interactions = sum(
         numeric_usage_value(run["metrics"]["test"]["total_user_agent_interactions"]) for run in runs
     )
+    pass_at_n_tasks = []
+    for task_path in test_tasks:
+        task_name = task_path.name
+        run_successes = []
+        for run in runs:
+            matching_task = next(
+                (
+                    task_result
+                    for task_result in run["test_tasks"]
+                    if task_result.get("task_name") == task_name
+                ),
+                None,
+            )
+            run_successes.append(bool(matching_task and matching_task.get("success")))
+        success_count = sum(1 for success in run_successes if success)
+        pass_at_n_tasks.append(
+            {
+                "task_name": task_name,
+                "passed": success_count > 0,
+                "successes": success_count,
+                "attempts": len(run_successes),
+                "run_successes": run_successes,
+            }
+        )
+    pass_at_n_passed_tasks = sum(1 for task in pass_at_n_tasks if task["passed"])
+    pass_at_n_total_tasks = len(pass_at_n_tasks)
+    pass_at_n_rate = (
+        pass_at_n_passed_tasks / pass_at_n_total_tasks if pass_at_n_total_tasks else 0.0
+    )
     metrics = {
         "average_test_completion_rate": average(
             [float(run["metrics"]["test_completion_rate"]) for run in runs]
         ),
         "train_round_1": {
-            "average_tool_call_count_per_run": average(
-                [float(run["metrics"]["train_round_1"]["tool_call_count"]) for run in runs]
-            ),
-            "average_tokens_per_run": average(
-                [float(run["metrics"]["train_round_1"]["total_tokens"]) for run in runs]
-            ),
+            "tool_call_count": train_round_metrics["1"]["tool_call_count"],
+            "total_tokens": train_round_metrics["1"]["total_tokens"],
         },
         "train_round_2": {
-            "average_tool_call_count_per_run": average(
-                [float(run["metrics"]["train_round_2"]["tool_call_count"]) for run in runs]
-            ),
-            "average_tokens_per_run": average(
-                [float(run["metrics"]["train_round_2"]["total_tokens"]) for run in runs]
-            ),
+            "tool_call_count": train_round_metrics["2"]["tool_call_count"],
+            "total_tokens": train_round_metrics["2"]["total_tokens"],
         },
         "test": {
             "avg_tool_call_count_per_task": (
@@ -862,6 +917,13 @@ def run_evaluation(
             "avg_interactions_per_task": (
                 aggregate_test_interactions / total_test_tasks if total_test_tasks else 0.0
             ),
+            "pass@N": {
+                "n": num_runs,
+                "rate": pass_at_n_rate,
+                "passed_tasks": pass_at_n_passed_tasks,
+                "total_tasks": pass_at_n_total_tasks,
+                "tasks": pass_at_n_tasks,
+            },
         },
     }
 
@@ -888,6 +950,7 @@ def run_evaluation(
         "num_train_tasks": len(train_tasks),
         "num_test_tasks": len(test_tasks),
         "metrics": metrics,
+        "training": training,
         "runs": runs,
     }
 
@@ -925,14 +988,18 @@ def main() -> None:
     print("\n=== SkillFlow OpenClaw Evaluation Complete ===")
     print(f"Average test completion rate: {results['metrics']['average_test_completion_rate']:.4f}")
     print(
-        "Train round 1 average tool calls/tokens per run: "
-        f"{results['metrics']['train_round_1']['average_tool_call_count_per_run']:.2f}/"
-        f"{results['metrics']['train_round_1']['average_tokens_per_run']:.2f}"
+        f"Test pass@{results['metrics']['test']['pass@N']['n']}: "
+        f"{results['metrics']['test']['pass@N']['rate']:.4f}"
     )
     print(
-        "Train round 2 average tool calls/tokens per run: "
-        f"{results['metrics']['train_round_2']['average_tool_call_count_per_run']:.2f}/"
-        f"{results['metrics']['train_round_2']['average_tokens_per_run']:.2f}"
+        "Train round 1 tool calls/tokens: "
+        f"{results['metrics']['train_round_1']['tool_call_count']:.2f}/"
+        f"{results['metrics']['train_round_1']['total_tokens']:.2f}"
+    )
+    print(
+        "Train round 2 tool calls/tokens: "
+        f"{results['metrics']['train_round_2']['tool_call_count']:.2f}/"
+        f"{results['metrics']['train_round_2']['total_tokens']:.2f}"
     )
     print(
         "Test averages per task tool calls/tokens/interactions: "
