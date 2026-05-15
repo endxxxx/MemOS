@@ -32,12 +32,14 @@ TASK_FAMILY_PERMISSION_MODE = 0o755
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Evaluate OpenClaw on a SkillFlow task family.")
+    parser = argparse.ArgumentParser(description="Evaluate OpenClaw on SkillFlow task families.")
     parser.add_argument(
         "--task_family_name",
         type=str,
+        nargs="+",
         required=True,
-        help="Name of the task family directory under /root/SkillFlow_Data.",
+        metavar="TASK_FAMILY_NAME",
+        help="One or more task family directories under /root/SkillFlow_Data.",
     )
     parser.add_argument(
         "--num_runs",
@@ -970,22 +972,9 @@ def save_results(
     return output_path
 
 
-def main() -> None:
-    args = parse_args()
-
-    results = run_evaluation(
-        task_family_name=args.task_family_name,
-        num_runs=args.num_runs,
-        version=args.version,
-        client_type=args.client_type,
-        num_train_set=args.num_train_set,
-        train_max_turns=args.train_max_turns,
-        test_max_turns=args.test_max_turns,
-        only_test=args.only_test,
-    )
-    output_path = save_results(results, args.version, args.client_type, args.task_family_name)
-
-    print("\n=== SkillFlow OpenClaw Evaluation Complete ===")
+def print_result_summary(results: dict[str, Any], output_path: Path) -> None:
+    task_family = results["metadata"]["task_family"]
+    print(f"\n=== SkillFlow OpenClaw Evaluation Complete: {task_family} ===")
     print(f"Average test completion rate: {results['metrics']['average_test_completion_rate']:.4f}")
     print(
         f"Test pass@{results['metrics']['test']['pass@N']['n']}: "
@@ -1008,6 +997,33 @@ def main() -> None:
         f"{results['metrics']['test']['avg_interactions_per_task']:.2f}"
     )
     print(f"Results saved to: {output_path}")
+
+
+def main() -> None:
+    args = parse_args()
+    output_paths = []
+
+    for task_family_name in args.task_family_name:
+        print(f"\n=== Starting SkillFlow task family: {task_family_name} ===")
+        results = run_evaluation(
+            task_family_name=task_family_name,
+            num_runs=args.num_runs,
+            version=args.version,
+            client_type=args.client_type,
+            num_train_set=args.num_train_set,
+            train_max_turns=args.train_max_turns,
+            test_max_turns=args.test_max_turns,
+            only_test=args.only_test,
+        )
+        output_path = save_results(results, args.version, args.client_type, task_family_name)
+        print_result_summary(results, output_path)
+        output_paths.append(output_path)
+
+    if len(output_paths) > 1:
+        print("\n=== SkillFlow Batch Evaluation Complete ===")
+        print("Result files:")
+        for output_path in output_paths:
+            print(f"- {output_path}")
 
 
 if __name__ == "__main__":
