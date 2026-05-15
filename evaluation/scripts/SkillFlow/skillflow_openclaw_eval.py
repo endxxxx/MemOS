@@ -106,6 +106,19 @@ def resolve_task_family_path(task_family_name: str) -> Path:
     return task_family_path
 
 
+def validate_task_family_names(task_family_names: list[str]) -> None:
+    missing_task_family_names = [
+        task_family_name
+        for task_family_name in task_family_names
+        if not (SKILLFLOW_DATA_ROOT / task_family_name).is_dir()
+    ]
+    if missing_task_family_names:
+        formatted_names = ", ".join(missing_task_family_names)
+        raise FileNotFoundError(
+            f"Task families not found under {SKILLFLOW_DATA_ROOT}: {formatted_names}"
+        )
+
+
 def chmod_task_family_path(task_family_path: Path) -> None:
     task_family_path.chmod(TASK_FAMILY_PERMISSION_MODE)
     for path in task_family_path.rglob("*"):
@@ -1002,6 +1015,7 @@ def print_result_summary(results: dict[str, Any], output_path: Path) -> None:
 def main() -> None:
     args = parse_args()
     output_paths = []
+    validate_task_family_names(args.task_family_name)
 
     for task_family_name in args.task_family_name:
         print(f"\n=== Starting SkillFlow task family: {task_family_name} ===")
