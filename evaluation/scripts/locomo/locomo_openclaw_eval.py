@@ -38,6 +38,7 @@ def update_plugin_and_restart(client_type, **kwargs):
         "honcho": "openclaw-honcho",
         "byterover": "byterover",
         "hindsight": "hindsight-openclaw",
+        "tencentdb": "memory-tencentdb",
     }
 
     if str(client_type).lower() == "openclaw":
@@ -55,6 +56,9 @@ def update_plugin_and_restart(client_type, **kwargs):
     for key, value in kwargs.items():
         if value is not None:
             config_key = key.replace("_", "-")
+            if plugin_name == "memory-tencentdb":
+                config_key = f"{config_key}.enabled"
+
             if isinstance(value, bool):
                 cmd = f"{base}.{plugin_name}.config.{config_key} {str(value).lower()}"
             else:
@@ -268,6 +272,8 @@ async def evaluate_client(
             update_plugin_and_restart(client_type, addEnabled=True, recallEnabled=False)
         elif str(client_type).lower() in ["mem0", "openviking", "memorylake", "supermemory"]:
             update_plugin_and_restart(client_type, autoCapture=True, autoRecall=False)
+        elif str(client_type).lower() == "tencentdb":
+            update_plugin_and_restart(client_type, capture=True, extraction=True, recall=False)
 
         conversation = user_data.get("conversation", {})
         messages = process_conversation(conversation)
@@ -352,6 +358,8 @@ async def evaluate_client(
             update_plugin_and_restart(client_type, addEnabled=False, recallEnabled=True)
         elif str(client_type).lower() in ["mem0", "openviking", "memorylake", "supermemory"]:
             update_plugin_and_restart(client_type, autoCapture=False, autoRecall=True)
+        elif str(client_type).lower() == "tencentdb":
+            update_plugin_and_restart(client_type, capture=False, extraction=False, recall=True)
 
         qa_pairs = user_data.get("qa", [])
         print(f"Processing QA for user {user_id}...current time: {datetime.now()}")
@@ -475,6 +483,7 @@ async def main():
             "honcho",
             "byterover",
             "hindsight",
+            "tencentdb",
         ],
         default="openclaw",
         help="The type of client to evaluate",
