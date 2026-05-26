@@ -98,7 +98,7 @@ class OpenclawClient:
 
     def __init__(self, apikey: str, baseurl: str, agent_id: str = "main"):
         self.apikey = apikey
-        self.baseurl = baseurl
+        self.baseurl = baseurl.rstrip("/")
         self.header = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.apikey}",
@@ -159,6 +159,86 @@ class OpenclawClient:
                     f"{self.baseurl}/v1/chat/completions",
                     headers=headers,
                     json=payload,
+                )
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    time.sleep(2**attempt)
+                else:
+                    raise e
+
+
+class HermesClient:
+    """HTTP client for Hermes Agent API Server OpenAI-compatible /v1/chat/completions."""
+
+    def __init__(self, apikey: str, baseurl: str, model: str = "hermes-agent"):
+        self.apikey = apikey
+        self.baseurl = baseurl.rstrip("/")
+        self.model = model
+        self.header = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.apikey}",
+        }
+
+    def _headers(self, user_id=None):
+        headers = dict(self.header)
+        if user_id:
+            headers["X-Hermes-Session-Key"] = user_id
+        return headers
+
+    def add(self, messages, user_id, timestamp, batch_size=2):
+        def process_batch(batch_messages):
+            concat_add_query = "You need to remember the following messages:\n"
+            for msg in batch_messages:
+                concat_add_query += f"{msg.get('role')}: {msg.get('content')}\n"
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    payload = {
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": concat_add_query}],
+                        "stream": False,
+                    }
+                    response = requests.post(
+                        f"{self.baseurl}/v1/chat/completions",
+                        headers=self._headers(user_id),
+                        json=payload,
+                        timeout=1800,
+                    )
+                    response.raise_for_status()
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        time.sleep(2**attempt)
+                    else:
+                        raise e
+
+        batches = [messages[i : i + batch_size] for i in range(0, len(messages), batch_size)]
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            futures = {executor.submit(process_batch, batch): batch for batch in batches}
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception:
+                    continue
+
+    def search(self, query, user_id, top_k, session_key=None):
+        del top_k  # Hermes agent handles retrieval internally.
+        memory_scope = session_key or user_id
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                payload = {
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": query}],
+                    "stream": False,
+                }
+                response = requests.post(
+                    f"{self.baseurl}/v1/chat/completions",
+                    headers=self._headers(memory_scope),
+                    json=payload,
+                    timeout=1800,
                 )
                 response.raise_for_status()
                 return response.json()
