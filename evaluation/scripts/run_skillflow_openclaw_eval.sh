@@ -20,7 +20,7 @@ cd "$EVAL_ROOT"
 export PYTHONPATH=/root/MemOS/evaluation
 
 echo "Running skillflow_openclaw_eval.py..."
-python3 scripts/SkillFlow/skillflow_openclaw_eval.py \
+python scripts/SkillFlow/skillflow_openclaw_eval.py \
   --task_family_name "${TASK_FAMILY_NAME_ARGS[@]}" \
   --num_runs "$NUM_RUNS" \
   --num_train_set "$NUM_TRAIN_SET" \

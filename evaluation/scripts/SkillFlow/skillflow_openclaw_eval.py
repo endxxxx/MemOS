@@ -5,6 +5,7 @@ import ast
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -29,6 +30,9 @@ SKILLFLOW_DATA_ROOT = Path("/root/SkillFlow_Data")
 SKILLFLOW_OUTPUT_ROOT = Path("/root/SkillFlow_Outputs")
 OPENCLAW_AGENTS_ROOT = Path("/root/.openclaw/agents")
 TASK_FAMILY_PERMISSION_MODE = 0o755
+MEMOS_LOCAL_SNAPSHOT_ROOT = SKILLFLOW_OUTPUT_ROOT / ".memos-local-db-snapshots"
+MEMOS_LOCAL_DB_SIDECAR_SUFFIXES = ("-wal", "-shm")
+OPENCLAW_GATEWAY_RESTART_WAIT_SECONDS = 10
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,6 +94,7 @@ def parse_args() -> argparse.Namespace:
             "mem9",
             "openviking",
             "mem0",
+            "tencentdb",
         ],
         default="openclaw",
         help="OpenClaw client/plugin type to evaluate.",
@@ -179,21 +184,19 @@ def update_plugin_and_restart(client_type: str, **kwargs: Any) -> None:
     plugin_mapping = {
         "mem0": "openclaw-mem0",
         "memos-cloud": "memos-cloud-openclaw-plugin",
-        "memos-local": "memos-local-openclaw-plugin",
+        "memos-local": "memos-local-plugin",
         "mem9": "mem9",
         "openviking": "openviking",
         "supermemory": "openclaw-supermemory",
         "memorylake": "memorylake-openclaw",
         "honcho": "openclaw-honcho",
         "byterover": "byterover",
+        "tencentdb": "memory-tencentdb",
     }
 
     normalized_client_type = str(client_type).lower()
     if normalized_client_type == "openclaw":
         print("evaluating openclaw client, no need for plugin config update")
-        return
-    if normalized_client_type != "memos-cloud":
-        print(f"evaluating {client_type} client, no per-run plugin config update needed")
         return
 
     base = "openclaw config set plugins.entries"
@@ -203,6 +206,9 @@ def update_plugin_and_restart(client_type: str, **kwargs: Any) -> None:
     for key, value in kwargs.items():
         if value is not None:
             config_key = key.replace("_", "-")
+            if plugin_name == "memory-tencentdb":
+                config_key = f"{config_key}.enabled"
+
             if isinstance(value, bool):
                 cmd = f"{base}.{plugin_name}.config.{config_key} {str(value).lower()}"
             else:
@@ -218,6 +224,26 @@ def update_plugin_and_restart(client_type: str, **kwargs: Any) -> None:
         print(f"Updated plugin config: {', '.join(cmds)}")
 
     time.sleep(10)
+
+
+def configure_plugin_before_training(client_type: str) -> None:
+    normalized_client_type = str(client_type).lower()
+    if normalized_client_type == "tencentdb":
+        update_plugin_and_restart(client_type, capture=True, extraction=True, recall=True)
+    if normalized_client_type == "memos-cloud":
+        update_plugin_and_restart(client_type, recallEnabled=True, addEnabled=True)
+    if normalized_client_type in ["memorylake", "mem0", "supermemory", "memorylake", "openviking"]:
+        update_plugin_and_restart(client_type, autoCapture=True, autoRecall=True)
+
+
+def configure_plugin_before_testing(client_type: str) -> None:
+    normalized_client_type = str(client_type).lower()
+    if normalized_client_type == "tencentdb":
+        update_plugin_and_restart(client_type, capture=False, extraction=False, recall=True)
+    if normalized_client_type == "memos-cloud":
+        update_plugin_and_restart(client_type, recallEnabled=True, addEnabled=False)
+    if normalized_client_type in ["memorylake", "mem0", "supermemory", "memorylake", "openviking"]:
+        update_plugin_and_restart(client_type, autoCapture=False, autoRecall=True)
 
 
 def new_agent_id(client_type: str, version: str, task_family_name: str, run_index: int) -> str:
@@ -484,13 +510,114 @@ def safe_session_fragment(value: str) -> str:
     return "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in value)
 
 
+def should_manage_memos_local_db(client_type: str) -> bool:
+    return str(client_type).lower() == "memos-local"
+
+
+def resolve_memos_local_home() -> Path:
+    env_home = os.getenv("MEMOS_HOME")
+    if env_home and env_home.strip():
+        return Path(env_home).expanduser().resolve()
+
+    env_config = os.getenv("MEMOS_CONFIG_FILE")
+    if env_config and env_config.strip():
+        return Path(env_config).expanduser().resolve().parent
+
+    return Path.home() / ".openclaw" / "memos-plugin"
+
+
+def resolve_memos_local_db_file() -> Path:
+    return resolve_memos_local_home() / "data" / "memos.db"
+
+
+def create_memos_local_db_snapshot(
+    client_type: str,
+    version: str,
+    task_family_name: str,
+    source_label: str,
+) -> dict[str, Any]:
+    db_file = resolve_memos_local_db_file()
+    if not db_file.is_file():
+        raise FileNotFoundError(f"memos-local database not found: {db_file}")
+
+    snapshot_name = safe_session_fragment(
+        f"{client_type}_{version}_{task_family_name}_{source_label}"
+    )
+    snapshot_dir = MEMOS_LOCAL_SNAPSHOT_ROOT / snapshot_name
+    if snapshot_dir.exists():
+        shutil.rmtree(snapshot_dir)
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+
+    snapshot_db_file = snapshot_dir / "memos.db"
+    tmp_snapshot_db_file = snapshot_dir / "memos.db.tmp"
+    if tmp_snapshot_db_file.exists():
+        tmp_snapshot_db_file.unlink()
+
+    source_uri = f"{db_file.resolve().as_uri()}?mode=ro"
+    with (
+        sqlite3.connect(source_uri, uri=True, timeout=30) as source,
+        sqlite3.connect(str(tmp_snapshot_db_file), timeout=30) as target,
+    ):
+        source.backup(target)
+    shutil.move(str(tmp_snapshot_db_file), str(snapshot_db_file))
+
+    metadata = {
+        "enabled": True,
+        "source_label": source_label,
+        "home": str(resolve_memos_local_home()),
+        "db_file": str(db_file),
+        "snapshot_dir": str(snapshot_dir),
+        "snapshot_db_file": str(snapshot_db_file),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    metadata_path = snapshot_dir / "metadata.json"
+    with metadata_path.open("w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2, ensure_ascii=False)
+    metadata["metadata_file"] = str(metadata_path)
+    return metadata
+
+
+def restart_openclaw_gateway(reason: str) -> None:
+    print(f"[memos-local-db] restarting OpenClaw gateway after {reason}")
+    subprocess.run(["openclaw", "gateway", "restart"], check=True)
+    time.sleep(OPENCLAW_GATEWAY_RESTART_WAIT_SECONDS)
+
+
+def restore_memos_local_db_snapshot(
+    snapshot: dict[str, Any],
+    context: str,
+) -> dict[str, Any]:
+    snapshot_db_file = Path(str(snapshot["snapshot_db_file"]))
+    db_file = Path(str(snapshot["db_file"]))
+    if not snapshot_db_file.is_file():
+        raise FileNotFoundError(f"memos-local snapshot db not found: {snapshot_db_file}")
+
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_restore_db_file = db_file.with_name(f".{db_file.name}.restore.tmp")
+    if tmp_restore_db_file.exists():
+        tmp_restore_db_file.unlink()
+
+    shutil.copy2(snapshot_db_file, tmp_restore_db_file)
+    for suffix in MEMOS_LOCAL_DB_SIDECAR_SUFFIXES:
+        with suppress(FileNotFoundError):
+            (Path(str(db_file) + suffix)).unlink()
+    os.replace(tmp_restore_db_file, db_file)
+    for suffix in MEMOS_LOCAL_DB_SIDECAR_SUFFIXES:
+        with suppress(FileNotFoundError):
+            (Path(str(db_file) + suffix)).unlink()
+
+    restart_openclaw_gateway(context)
+    return {
+        "ok": True,
+        "context": context,
+        "db_file": str(db_file),
+        "snapshot_db_file": str(snapshot_db_file),
+        "restored_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def build_initial_task_prompt(task_path: Path) -> str:
     return f"阅读{task_path.resolve()}下的instruction.md并完成其中的任务"
-
-
-def build_retry_prompt(verifier_stdout: str) -> str:
-    stdout = verifier_stdout.strip() or "验证器 stdout 为空。"
-    return f"任务执行结果验证不通过，请参考下面的信息继续修改\n\n{stdout}"
 
 
 def run_task_test(task_path: Path) -> dict[str, Any]:
@@ -573,7 +700,7 @@ def run_task(
 
         if test_result["success"] or turn_index >= max_turns:
             break
-        current_query = build_retry_prompt(str(test_result.get("stdout", "")))
+        current_query = "验证未通过，请重新检查 instruction 中的输出文件、格式和计算逻辑。"
 
     final_test_result = attempts[-1]["test"] if attempts else None
     success = bool(final_test_result and final_test_result["success"])
@@ -736,12 +863,15 @@ def run_evaluation(
     trained_agent_id: str | None = None
     train_session_key: str | None = None
     training: dict[str, Any] | None = None
+    memos_local_db_snapshot: dict[str, Any] | None = None
+    manage_memos_local_db = should_manage_memos_local_db(client_type)
 
     if not only_test:
         chmod_task_family_path(task_family_path)
         prepare_family_output_dir(task_family_path)
         trained_agent_id = new_training_agent_id(client_type, version, task_family_name)
         configure_plugin_for_agent(client_type, trained_agent_id)
+        configure_plugin_before_training(client_type)
         train_client = OpenclawClient(
             apikey=api_key,
             baseurl=base_url,
@@ -793,12 +923,36 @@ def run_evaluation(
             f"round_1_tool_calls={train_round_metrics['1']['tool_call_count']} "
             f"round_2_tool_calls={train_round_metrics['2']['tool_call_count']}"
         )
+        if manage_memos_local_db:
+            memos_local_db_snapshot = create_memos_local_db_snapshot(
+                client_type=client_type,
+                version=version,
+                task_family_name=task_family_name,
+                source_label="after_training",
+            )
+            training["memos_local_db_snapshot"] = memos_local_db_snapshot
+            print(
+                "[memos-local-db] training snapshot saved to "
+                f"{memos_local_db_snapshot['snapshot_db_file']}"
+            )
+    elif manage_memos_local_db:
+        memos_local_db_snapshot = create_memos_local_db_snapshot(
+            client_type=client_type,
+            version=version,
+            task_family_name=task_family_name,
+            source_label="only_test_initial",
+        )
+        print(
+            "[memos-local-db] only-test baseline snapshot saved to "
+            f"{memos_local_db_snapshot['snapshot_db_file']}"
+        )
 
     for run_index in range(1, num_runs + 1):
         chmod_task_family_path(task_family_path)
         prepare_family_output_dir(task_family_path)
         agent_id = new_agent_id(client_type, version, task_family_name, run_index)
         configure_plugin_for_agent(client_type, agent_id)
+        configure_plugin_before_testing(client_type)
         client = OpenclawClient(apikey=api_key, baseurl=base_url, agent_id=agent_id)
 
         print(f"\n=== SkillFlow test run {run_index}/{num_runs} | agent_id={agent_id} ===")
@@ -826,6 +980,23 @@ def run_evaluation(
                     max_turns=test_max_turns,
                     error=str(exc),
                 )
+
+            if memos_local_db_snapshot is not None:
+                restore_context = (
+                    f"test task {task_index}/{len(test_tasks)} run {run_index}/{num_runs}"
+                )
+                try:
+                    task_result["memos_local_db_restore"] = restore_memos_local_db_snapshot(
+                        memos_local_db_snapshot,
+                        restore_context,
+                    )
+                except Exception as exc:
+                    task_result["memos_local_db_restore"] = {
+                        "ok": False,
+                        "context": restore_context,
+                        "error": str(exc),
+                    }
+                    raise
 
             if task_result["success"]:
                 test_successes += 1
@@ -961,6 +1132,7 @@ def run_evaluation(
         "train_max_turns": train_max_turns,
         "test_max_turns": test_max_turns,
         "only_test": only_test,
+        "memos_local_db_snapshot": memos_local_db_snapshot,
         "num_tasks": len(tasks),
         "num_train_tasks": len(train_tasks),
         "num_test_tasks": len(test_tasks),
