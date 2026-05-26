@@ -28,6 +28,7 @@ from scripts.utils.client import OpenclawClient  # noqa: E402
 def update_plugin_and_restart(client_type, **kwargs):
     plugin_mapping = {
         "mem0": "openclaw-mem0",
+        "memos-cloud-cli": "memos-cloud-openclaw-plugin",
         "memos-cloud": "memos-cloud-openclaw-plugin",
         "memos-local": "memos-local-openclaw-plugin",
         "mem9": "mem9",
@@ -69,6 +70,11 @@ def update_plugin_and_restart(client_type, **kwargs):
         print(f"Updated plugin config: {', '.join(cmds)}")
 
     time.sleep(10)
+
+
+def update_cli_user_id(user_id):
+    cmd = f"memos config set defaults.user_id '{user_id}'"
+    subprocess.run(cmd, shell=True, check=True)
 
 
 def update_model_apikey_and_base_url(model_apikey=None, model_base_url=None):
@@ -248,15 +254,17 @@ async def evaluate_client(
         user_id = f"locomo_exp_user_{user_idx}_{client_type}_{version}"
         client.set_agent_id(user_id)
 
+        if str(client_type).lower() in ["memos-cloud-cli", "memos-cli"]:
+            update_cli_user_id(user_id)
         if str(client_type).lower() == "honcho":
             update_plugin_and_restart(client_type, workspaceId=user_id)
-        if str(client_type).lower() in ["memos-cloud", "mem0"]:
+        if str(client_type).lower() in ["memos-cloud", "mem0", "memos-cloud-cli"]:
             update_plugin_and_restart(client_type, userId=user_id)
         if str(client_type).lower() == "supermemory":
             update_plugin_and_restart(client_type, containerTag=user_id)
         if str(client_type).lower() == "hindsight":
             update_plugin_and_restart(client_type, autoRetain=True, autoRecall=False)
-        if str(client_type).lower() == "memos-cloud":
+        if str(client_type).lower() in ["memos-cloud", "memos-cloud-cli"]:
             update_plugin_and_restart(client_type, addEnabled=True, recallEnabled=False)
         elif str(client_type).lower() in ["mem0", "openviking", "memorylake", "supermemory"]:
             update_plugin_and_restart(client_type, autoCapture=True, autoRecall=False)
@@ -330,15 +338,17 @@ async def evaluate_client(
         user_id = f"locomo_exp_user_{user_idx}_{client_type}_{version}"
         client.set_agent_id(user_id)
 
+        if str(client_type).lower() in ["memos-cloud-cli", "memos-cli"]:
+            update_cli_user_id(user_id)
         if str(client_type).lower() == "honcho":
             update_plugin_and_restart(client_type, workspaceId=user_id)
-        if str(client_type).lower() in ["memos-cloud", "mem0"]:
+        if str(client_type).lower() in ["memos-cloud", "mem0", "memos-cloud-cli"]:
             update_plugin_and_restart(client_type, userId=user_id)
         if str(client_type).lower() == "supermemory":
             update_plugin_and_restart(client_type, containerTag=user_id)
         if str(client_type).lower() == "hindsight":
             update_plugin_and_restart(client_type, autoRetain=False, autoRecall=True)
-        if str(client_type).lower() == "memos-cloud":
+        if str(client_type).lower() in ["memos-cloud", "memos-cloud-cli"]:
             update_plugin_and_restart(client_type, addEnabled=False, recallEnabled=True)
         elif str(client_type).lower() in ["mem0", "openviking", "memorylake", "supermemory"]:
             update_plugin_and_restart(client_type, autoCapture=False, autoRecall=True)
@@ -453,6 +463,8 @@ async def main():
         type=str,
         choices=[
             "openclaw",
+            "memos-cloud-cli",
+            "memos-cli",
             "memos-cloud",
             "memos-local",
             "openviking",
