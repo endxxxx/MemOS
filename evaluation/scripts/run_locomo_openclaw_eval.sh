@@ -13,6 +13,6 @@ export PYTHONPATH="$EVAL_ROOT"
 echo "Running locomo_openclaw_eval.py..."
 python scripts/locomo/locomo_openclaw_eval.py --client_type "$LIB" --version "$VERSION"
 
-echo "Running locomo_openclaw_metrics.py..."
-python scripts/locomo/locomo_openclaw_metrics.py --client_type "$LIB" --version "$VERSION"
+echo "Running locomo_agent_metrics.py..."
+python scripts/locomo/locomo_agent_metrics.py --client_type "$LIB" --version "$VERSION"
 echo "All scripts completed successfully!"
