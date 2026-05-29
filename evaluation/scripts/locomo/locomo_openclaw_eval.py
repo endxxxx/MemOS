@@ -370,7 +370,9 @@ async def evaluate_client(
             async with semaphore:
                 return await process_qa_pair(client, qa, user_id, loop)
 
-        for qa_idx, qa in enumerate(qa_pairs):
+        for qa_idx, qa in tqdm(
+            enumerate(qa_pairs), total=len(qa_pairs), desc=f"Processing QA for user {user_id}"
+        ):
             qa_record_key = f"{user_idx}_{qa_idx}"
 
             if resume and qa_record_key in completed_qa_records:
