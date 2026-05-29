@@ -348,7 +348,7 @@ async def evaluate_client(
             update_cli_user_id(user_id)
         if str(client_type).lower() == "honcho":
             update_plugin_and_restart(client_type, workspaceId=user_id)
-        if str(client_type).lower() in ["memos-cloud", "mem0", "memos-cloud-cli"]:
+        if str(client_type).lower() in ["memos-cloud", "mem0", "memos-cloud-cli", "openviking"]:
             update_plugin_and_restart(client_type, userId=user_id)
         if str(client_type).lower() == "supermemory":
             update_plugin_and_restart(client_type, containerTag=user_id)

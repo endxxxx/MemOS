@@ -258,7 +258,7 @@ def configure_plugin_for_agent(client_type: str, agent_id: str) -> None:
     normalized_client_type = str(client_type).lower()
     if normalized_client_type == "honcho":
         update_plugin_and_restart(client_type, workspaceId=agent_id)
-    if normalized_client_type in ["memos-cloud", "mem0"]:
+    if normalized_client_type in ["memos-cloud", "mem0", "openviking"]:
         update_plugin_and_restart(client_type, userId=agent_id)
     if normalized_client_type == "supermemory":
         update_plugin_and_restart(client_type, containerTag=agent_id)
