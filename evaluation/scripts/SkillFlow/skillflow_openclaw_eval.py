@@ -27,7 +27,9 @@ from scripts.utils.client import OpenclawClient  # noqa: E402
 
 RANKING_FILE = "ALL_TASK_DIFFICULTY_RANKING.json"
 SKILLFLOW_DATA_ROOT = Path("/root/SkillFlow_Data")
+SKILLFLOW_TEST_ROOT = Path("/root/SkillFlow_Test")
 SKILLFLOW_OUTPUT_ROOT = Path("/root/SkillFlow_Outputs")
+SKILLFLOW_RESULTS_DIR = Path(__file__).resolve().parent.parent.parent / "results" / "skillflow"
 OPENCLAW_AGENTS_ROOT = Path("/root/.openclaw/agents")
 TASK_FAMILY_PERMISSION_MODE = 0o755
 MEMOS_LOCAL_SNAPSHOT_ROOT = SKILLFLOW_OUTPUT_ROOT / ".memos-local-db-snapshots"
@@ -38,12 +40,20 @@ OPENCLAW_GATEWAY_RESTART_WAIT_SECONDS = 10
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate OpenClaw on SkillFlow task families.")
     parser.add_argument(
-        "--task_family_name",
+        "--include_domain",
         type=str,
         nargs="+",
-        required=True,
-        metavar="TASK_FAMILY_NAME",
-        help="One or more task family directories under /root/SkillFlow_Data.",
+        default=None,
+        metavar="DOMAIN",
+        help="Only evaluate task families under these domains (directories under SKILLFLOW_DATA_ROOT).",
+    )
+    parser.add_argument(
+        "--exclude_domain",
+        type=str,
+        nargs="+",
+        default=None,
+        metavar="DOMAIN",
+        help="Evaluate all task families except these domains. Cannot be used with --include_domain.",
     )
     parser.add_argument(
         "--num_runs",
@@ -111,17 +121,47 @@ def resolve_task_family_path(task_family_name: str) -> Path:
     return task_family_path
 
 
-def validate_task_family_names(task_family_names: list[str]) -> None:
-    missing_task_family_names = [
-        task_family_name
-        for task_family_name in task_family_names
-        if not (SKILLFLOW_DATA_ROOT / task_family_name).is_dir()
-    ]
-    if missing_task_family_names:
-        formatted_names = ", ".join(missing_task_family_names)
-        raise FileNotFoundError(
-            f"Task families not found under {SKILLFLOW_DATA_ROOT}: {formatted_names}"
-        )
+def discover_task_family_names() -> list[str]:
+    if not SKILLFLOW_DATA_ROOT.is_dir():
+        raise FileNotFoundError(f"SkillFlow data root not found: {SKILLFLOW_DATA_ROOT}")
+    return sorted(
+        path.name
+        for path in SKILLFLOW_DATA_ROOT.iterdir()
+        if path.is_dir() and (path / RANKING_FILE).is_file()
+    )
+
+
+def resolve_task_family_names(
+    include_domain: list[str] | None,
+    exclude_domain: list[str] | None,
+) -> list[str]:
+    available = discover_task_family_names()
+    available_set = set(available)
+
+    if include_domain:
+        missing = [name for name in include_domain if name not in available_set]
+        if missing:
+            formatted_names = ", ".join(missing)
+            raise FileNotFoundError(
+                f"Domains not found under {SKILLFLOW_DATA_ROOT}: {formatted_names}"
+            )
+        return list(include_domain)
+
+    if exclude_domain:
+        missing = [name for name in exclude_domain if name not in available_set]
+        if missing:
+            formatted_names = ", ".join(missing)
+            raise FileNotFoundError(
+                f"Domains not found under {SKILLFLOW_DATA_ROOT}: {formatted_names}"
+            )
+        exclude_set = set(exclude_domain)
+        return [name for name in available if name not in exclude_set]
+
+    return available
+
+
+def resolve_test_script_path(task_path: Path) -> Path:
+    return SKILLFLOW_TEST_ROOT / task_path.parent.name / task_path.name / "tests" / "test.sh"
 
 
 def chmod_task_family_path(task_family_path: Path) -> None:
@@ -147,7 +187,7 @@ def load_task_order(task_family_path: Path) -> list[Path]:
     for task_name in task_names:
         task_path = task_family_path / task_name
         instruction_path = task_path / "instruction.md"
-        test_script = task_path / "tests" / "test.sh"
+        test_script = resolve_test_script_path(task_path)
 
         if not task_path.is_dir():
             raise FileNotFoundError(f"Ranked task directory not found: {task_path}")
@@ -622,7 +662,9 @@ def build_initial_task_prompt(task_path: Path) -> str:
 
 def run_task_test(task_path: Path) -> dict[str, Any]:
     clear_verifier_artifacts(task_path)
-    test_script = task_path / "tests" / "test.sh"
+    test_script = resolve_test_script_path(task_path)
+    if not test_script.is_file():
+        raise FileNotFoundError(f"Task test script not found: {test_script}")
 
     started_at = time.time()
     completed = subprocess.run(
@@ -1142,12 +1184,42 @@ def run_evaluation(
     }
 
 
-def save_results(
-    results: dict[str, Any], version: str, client_type: str, task_family_name: str
-) -> Path:
-    output_dir = Path(__file__).resolve().parent.parent.parent / "results"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / f"skillflow-{client_type}-{version}-{task_family_name.lower()}.json"
+def build_aggregated_results(
+    *,
+    version: str,
+    client_type: str,
+    include_domain: list[str] | None,
+    exclude_domain: list[str] | None,
+    task_family_names: list[str],
+    family_results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    family_metrics = [result["metrics"] for result in family_results]
+    return {
+        "metadata": {
+            "benchmark": "SkillFlow",
+            "client": client_type,
+            "version": version,
+            "include_domain": include_domain,
+            "exclude_domain": exclude_domain,
+            "task_families": task_family_names,
+            "data_root": str(SKILLFLOW_DATA_ROOT),
+            "test_root": str(SKILLFLOW_TEST_ROOT),
+            "output_root": str(SKILLFLOW_OUTPUT_ROOT),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+        "metrics": {
+            "average_test_completion_rate": average(
+                [float(metrics["average_test_completion_rate"]) for metrics in family_metrics]
+            ),
+            "task_family_count": len(family_results),
+        },
+        "task_families": family_results,
+    }
+
+
+def save_results(results: dict[str, Any], version: str, client_type: str) -> Path:
+    SKILLFLOW_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = SKILLFLOW_RESULTS_DIR / f"skillflow-{client_type}-{version}.json"
 
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as f:
@@ -1157,59 +1229,79 @@ def save_results(
     return output_path
 
 
-def print_result_summary(results: dict[str, Any], output_path: Path) -> None:
-    task_family = results["metadata"]["task_family"]
-    print(f"\n=== SkillFlow OpenClaw Evaluation Complete: {task_family} ===")
-    print(f"Average test completion rate: {results['metrics']['average_test_completion_rate']:.4f}")
-    print(
-        f"Test pass@{results['metrics']['test']['pass@N']['n']}: "
-        f"{results['metrics']['test']['pass@N']['rate']:.4f}"
-    )
+def print_family_result_summary(family_result: dict[str, Any]) -> None:
+    task_family = family_result["metadata"]["task_family"]
+    metrics = family_result["metrics"]
+    print(f"\n--- {task_family} ---")
+    print(f"Average test completion rate: {metrics['average_test_completion_rate']:.4f}")
+    print(f"Test pass@{metrics['test']['pass@N']['n']}: {metrics['test']['pass@N']['rate']:.4f}")
     print(
         "Train round 1 tool calls/tokens: "
-        f"{results['metrics']['train_round_1']['tool_call_count']:.2f}/"
-        f"{results['metrics']['train_round_1']['total_tokens']:.2f}"
+        f"{metrics['train_round_1']['tool_call_count']:.2f}/"
+        f"{metrics['train_round_1']['total_tokens']:.2f}"
     )
     print(
         "Train round 2 tool calls/tokens: "
-        f"{results['metrics']['train_round_2']['tool_call_count']:.2f}/"
-        f"{results['metrics']['train_round_2']['total_tokens']:.2f}"
+        f"{metrics['train_round_2']['tool_call_count']:.2f}/"
+        f"{metrics['train_round_2']['total_tokens']:.2f}"
     )
     print(
         "Test averages per task tool calls/tokens/interactions: "
-        f"{results['metrics']['test']['avg_tool_call_count_per_task']:.2f}/"
-        f"{results['metrics']['test']['avg_tokens_per_task']:.2f}/"
-        f"{results['metrics']['test']['avg_interactions_per_task']:.2f}"
+        f"{metrics['test']['avg_tool_call_count_per_task']:.2f}/"
+        f"{metrics['test']['avg_tokens_per_task']:.2f}/"
+        f"{metrics['test']['avg_interactions_per_task']:.2f}"
     )
-    print(f"Results saved to: {output_path}")
+
+
+def print_result_summary(results: dict[str, Any], output_path: Path) -> None:
+    print("\n=== SkillFlow OpenClaw Evaluation Complete ===")
+    print(f"Task families evaluated: {', '.join(results['metadata']['task_families'])}")
+    print(
+        "Overall average test completion rate: "
+        f"{results['metrics']['average_test_completion_rate']:.4f}"
+    )
+    for family_result in results["task_families"]:
+        print_family_result_summary(family_result)
+    print(f"\nResults saved to: {output_path}")
 
 
 def main() -> None:
     args = parse_args()
-    output_paths = []
-    validate_task_family_names(args.task_family_name)
+    if args.include_domain and args.exclude_domain:
+        raise ValueError("--include_domain and --exclude_domain cannot be used together")
 
-    for task_family_name in args.task_family_name:
+    task_family_names = resolve_task_family_names(args.include_domain, args.exclude_domain)
+    if not task_family_names:
+        raise ValueError("No task families selected for evaluation")
+
+    SKILLFLOW_RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    family_results: list[dict[str, Any]] = []
+
+    for task_family_name in task_family_names:
         print(f"\n=== Starting SkillFlow task family: {task_family_name} ===")
-        results = run_evaluation(
-            task_family_name=task_family_name,
-            num_runs=args.num_runs,
-            version=args.version,
-            client_type=args.client_type,
-            num_train_set=args.num_train_set,
-            train_max_turns=args.train_max_turns,
-            test_max_turns=args.test_max_turns,
-            only_test=args.only_test,
+        family_results.append(
+            run_evaluation(
+                task_family_name=task_family_name,
+                num_runs=args.num_runs,
+                version=args.version,
+                client_type=args.client_type,
+                num_train_set=args.num_train_set,
+                train_max_turns=args.train_max_turns,
+                test_max_turns=args.test_max_turns,
+                only_test=args.only_test,
+            )
         )
-        output_path = save_results(results, args.version, args.client_type, task_family_name)
-        print_result_summary(results, output_path)
-        output_paths.append(output_path)
 
-    if len(output_paths) > 1:
-        print("\n=== SkillFlow Batch Evaluation Complete ===")
-        print("Result files:")
-        for output_path in output_paths:
-            print(f"- {output_path}")
+    aggregated_results = build_aggregated_results(
+        version=args.version,
+        client_type=args.client_type,
+        include_domain=args.include_domain,
+        exclude_domain=args.exclude_domain,
+        task_family_names=task_family_names,
+        family_results=family_results,
+    )
+    output_path = save_results(aggregated_results, args.version, args.client_type)
+    print_result_summary(aggregated_results, output_path)
 
 
 if __name__ == "__main__":
