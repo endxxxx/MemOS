@@ -86,10 +86,10 @@ def update_model_apikey_and_base_url(model_apikey=None, model_base_url=None):
         print("No model apikey or base url provided, leaving all config as is")
         return
     if model_apikey is not None:
-        cmd = f"openclaw config set models.providers.openai-codex.apiKey '{model_apikey}'"
+        cmd = f"openclaw config set models.providers.memtensor.apiKey '{model_apikey}'"
         subprocess.run(cmd, shell=True, check=True)
     if model_base_url is not None:
-        cmd = f"openclaw config set models.providers.openai-codex.baseUrl '{model_base_url}'"
+        cmd = f"openclaw config set models.providers.memtensor.baseUrl '{model_base_url}'"
         subprocess.run(cmd, shell=True, check=True)
     subprocess.run("openclaw gateway restart", shell=True, check=True)
 
