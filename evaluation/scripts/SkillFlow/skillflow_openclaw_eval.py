@@ -160,8 +160,21 @@ def resolve_task_family_names(
     return available
 
 
+def resolve_task_test_dir(task_path: Path) -> Path:
+    """Task directory under SKILLFLOW_TEST_ROOT (mirrors domain/task layout in data root)."""
+    return SKILLFLOW_TEST_ROOT / task_path.parent.name / task_path.name
+
+
+def resolve_task_tests_dir(task_path: Path) -> Path:
+    return resolve_task_test_dir(task_path) / "tests"
+
+
 def resolve_test_script_path(task_path: Path) -> Path:
-    return SKILLFLOW_TEST_ROOT / task_path.parent.name / task_path.name / "tests" / "test.sh"
+    return resolve_task_tests_dir(task_path) / "test.sh"
+
+
+def resolve_test_outputs_path(task_path: Path) -> Path:
+    return resolve_task_tests_dir(task_path) / "test_outputs.py"
 
 
 def chmod_task_family_path(task_family_path: Path) -> None:
@@ -324,12 +337,12 @@ def prepare_family_output_dir(task_family_path: Path) -> None:
 
 
 def verifier_dirs(task_path: Path) -> list[Path]:
-    return [Path("/logs/verifier"), task_path / "tests" / ".verifier"]
+    return [Path("/logs/verifier"), resolve_task_tests_dir(task_path) / ".verifier"]
 
 
 def reward_lookup_dirs(task_path: Path) -> list[Path]:
     primary = Path("/logs/verifier")
-    fallback = task_path / "tests" / ".verifier"
+    fallback = resolve_task_tests_dir(task_path) / ".verifier"
     if primary.is_dir() and os.access(primary, os.W_OK):
         return [primary, fallback]
     return [fallback, primary]
@@ -351,7 +364,8 @@ def read_reward(task_path: Path) -> tuple[float, Path | None]:
             raw_reward = reward_path.read_text(encoding="utf-8").strip()
             return float(raw_reward), reward_path
     raise FileNotFoundError(
-        "Verifier reward.txt was not produced in /logs/verifier or the task-local .verifier"
+        "Verifier reward.txt was not produced in /logs/verifier or "
+        f"{resolve_task_tests_dir(task_path) / '.verifier'}"
     )
 
 
@@ -371,7 +385,7 @@ def string_path_from_node(node: ast.AST) -> str | None:
 
 
 def collect_task_outputs(task_path: Path) -> set[Path]:
-    test_outputs = task_path / "tests" / "test_outputs.py"
+    test_outputs = resolve_test_outputs_path(task_path)
     if not test_outputs.is_file():
         return set()
 
@@ -663,13 +677,19 @@ def build_initial_task_prompt(task_path: Path) -> str:
 def run_task_test(task_path: Path) -> dict[str, Any]:
     clear_verifier_artifacts(task_path)
     test_script = resolve_test_script_path(task_path)
+    task_test_dir = resolve_task_test_dir(task_path)
     if not test_script.is_file():
         raise FileNotFoundError(f"Task test script not found: {test_script}")
+
+    test_env = os.environ.copy()
+    test_env["SKILLFLOW_TASK_DATA_DIR"] = str(task_path.resolve())
+    test_env["SKILLFLOW_TASK_TEST_DIR"] = str(task_test_dir.resolve())
 
     started_at = time.time()
     completed = subprocess.run(
         ["bash", str(test_script)],
-        cwd=str(task_path),
+        cwd=str(task_test_dir),
+        env=test_env,
         capture_output=True,
         text=True,
         check=False,
@@ -693,6 +713,9 @@ def run_task_test(task_path: Path) -> dict[str, Any]:
         "success": reward >= 1.0,
         "reward_path": str(reward_path) if reward_path else None,
         "error": error,
+        "test_script": str(test_script),
+        "test_cwd": str(task_test_dir),
+        "task_data_dir": str(task_path.resolve()),
     }
 
 
