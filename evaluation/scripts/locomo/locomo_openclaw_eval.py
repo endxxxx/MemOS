@@ -6,7 +6,8 @@ import subprocess
 import sys
 import time
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
@@ -34,6 +35,10 @@ from scripts.locomo.locomo_memos_local import (  # noqa: E402
     warmup_memos_bpp_hook,
 )
 from scripts.utils.client import OpenclawClient  # noqa: E402
+
+
+OPENCLAW_AGENTS_ROOT = Path(os.path.expanduser(os.getenv("OPENCLAW_STATE_DIR", "~/.openclaw"))) / "agents"
+MEMORY_ADD_PROMPT_MARKER = "You need to remember the following messages:"
 
 
 def update_plugin_and_restart(client_type, **kwargs):
@@ -231,6 +236,296 @@ def _save_stage_timing(path, stage_name, start_time, end_time):
 
     with open(path, "w") as f:
         json.dump(timing_data, f, indent=2)
+
+
+def _numeric_usage_value(value):
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return 0
+
+
+def _assistant_total_tokens(usage):
+    if not isinstance(usage, dict):
+        return 0
+
+    total_tokens = usage.get("totalTokens")
+    if isinstance(total_tokens, int | float) and not isinstance(total_tokens, bool):
+        return int(total_tokens)
+
+    return sum(_numeric_usage_value(usage.get(field)) for field in ("input", "output", "cacheRead", "cacheWrite"))
+
+
+def _usage_cost_total(usage):
+    cost = usage.get("cost") if isinstance(usage, dict) else None
+    if isinstance(cost, dict) and isinstance(cost.get("total"), int | float):
+        return float(cost["total"])
+    return 0.0
+
+
+def _user_message_text(message):
+    content = message.get("content", "")
+    if isinstance(content, list):
+        return "".join(
+            item.get("text", "") for item in content if isinstance(item, dict) and item.get("type") == "text"
+        )
+    return str(content)
+
+
+def _empty_phase_usage():
+    return {
+        "sessions": 0,
+        "assistant_messages": 0,
+        "total_tokens": 0,
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "cost_usd": 0.0,
+    }
+
+
+def _merge_phase_usage(target, source):
+    for key in (
+        "sessions",
+        "assistant_messages",
+        "total_tokens",
+        "input",
+        "output",
+        "cache_read",
+        "cache_write",
+    ):
+        target[key] += source[key]
+    target["cost_usd"] += source["cost_usd"]
+
+
+def _parse_stage_local_dt(value):
+    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S.%f")
+
+
+def _load_stage_windows(stage_timing_path):
+    if not os.path.exists(stage_timing_path):
+        return None
+
+    try:
+        with open(stage_timing_path) as f:
+            timing_data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"Warning: could not load stage timing for token stats: {e}")
+        return None
+
+    required = ("memory_addition", "qa_processing")
+    if not all(stage in timing_data for stage in required):
+        return None
+
+    return {
+        "memory_addition": (
+            _parse_stage_local_dt(timing_data["memory_addition"]["start_time"]),
+            _parse_stage_local_dt(timing_data["memory_addition"]["end_time"]),
+        ),
+        "qa_processing": (
+            _parse_stage_local_dt(timing_data["qa_processing"]["start_time"]),
+            _parse_stage_local_dt(timing_data["qa_processing"]["end_time"]),
+        ),
+    }
+
+
+def _session_start_local(records):
+    for record in records:
+        timestamp = record.get("timestamp")
+        if not timestamp:
+            continue
+        return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+    return None
+
+
+def _classify_session_phase(records, stage_windows):
+    session_start = _session_start_local(records)
+    if session_start is None:
+        return None
+
+    add_start, add_end = stage_windows["memory_addition"]
+    qa_start, qa_end = stage_windows["qa_processing"]
+    eval_start = add_start - timedelta(minutes=5)
+    eval_end = qa_end + timedelta(minutes=5)
+
+    if session_start < eval_start or session_start > eval_end:
+        return None
+
+    is_memory_addition = False
+    for record in records:
+        if record.get("type") != "message":
+            continue
+        message = record.get("message", {})
+        if message.get("role") != "user":
+            continue
+        if MEMORY_ADD_PROMPT_MARKER in _user_message_text(message):
+            is_memory_addition = True
+            break
+
+    if is_memory_addition:
+        return "memory_addition"
+    if session_start >= qa_start - timedelta(minutes=1):
+        return "qa_retrieval"
+    if add_start <= session_start <= add_end:
+        return "memory_addition_other"
+    return None
+
+
+def _summarize_session_usage(records):
+    usage_stats = _empty_phase_usage()
+    for record in records:
+        if record.get("type") != "message":
+            continue
+        message = record.get("message", {})
+        if message.get("role") != "assistant":
+            continue
+
+        usage = message.get("usage")
+        if not usage:
+            continue
+
+        usage_stats["assistant_messages"] += 1
+        usage_stats["total_tokens"] += _assistant_total_tokens(usage)
+        usage_stats["input"] += _numeric_usage_value(usage.get("input"))
+        usage_stats["output"] += _numeric_usage_value(usage.get("output"))
+        usage_stats["cache_read"] += _numeric_usage_value(usage.get("cacheRead"))
+        usage_stats["cache_write"] += _numeric_usage_value(usage.get("cacheWrite"))
+        usage_stats["cost_usd"] += _usage_cost_total(usage)
+
+    if usage_stats["assistant_messages"] == 0:
+        return None
+
+    usage_stats["sessions"] = 1
+    return usage_stats
+
+
+def _finalize_phase_usage(phase_usage):
+    sessions = phase_usage["sessions"]
+    phase_usage["avg_tokens_per_session"] = (
+        phase_usage["total_tokens"] / sessions if sessions else 0.0
+    )
+    phase_usage["cost_usd"] = round(phase_usage["cost_usd"], 6)
+    return phase_usage
+
+
+def collect_openclaw_token_usage(client_type, version, num_users, stage_timing_path):
+    stage_windows = _load_stage_windows(stage_timing_path)
+    if stage_windows is None:
+        print("Skipping OpenClaw token stats: stage timing unavailable")
+        return None
+
+    report = {
+        "client_type": client_type,
+        "version": version,
+        "memory_addition": _empty_phase_usage(),
+        "qa_retrieval": _empty_phase_usage(),
+        "excluded_sessions": 0,
+        "memory_addition_other_sessions": 0,
+        "per_user": {
+            "memory_addition": {},
+            "qa_retrieval": {},
+        },
+        "stage_timing_source": stage_timing_path,
+    }
+
+    for user_idx in range(num_users):
+        agent_id = f"locomo_exp_user_{user_idx}_{client_type}_{version}"
+        sessions_dir = OPENCLAW_AGENTS_ROOT / agent_id / "sessions"
+        if not sessions_dir.is_dir():
+            continue
+
+        for jsonl_path in sorted(sessions_dir.glob("*.jsonl")):
+            if jsonl_path.name.endswith(".trajectory.jsonl"):
+                continue
+
+            records = []
+            try:
+                with jsonl_path.open(encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        records.append(json.loads(line))
+            except (OSError, json.JSONDecodeError) as e:
+                print(f"Warning: could not read session log {jsonl_path}: {e}")
+                continue
+
+            phase = _classify_session_phase(records, stage_windows)
+            if phase is None:
+                report["excluded_sessions"] += 1
+                continue
+            if phase == "memory_addition_other":
+                report["memory_addition_other_sessions"] += 1
+                continue
+
+            session_usage = _summarize_session_usage(records)
+            if session_usage is None:
+                report["excluded_sessions"] += 1
+                continue
+
+            _merge_phase_usage(report[phase], session_usage)
+            report["per_user"][phase][agent_id] = (
+                report["per_user"][phase].get(agent_id, 0) + session_usage["total_tokens"]
+            )
+
+    report["memory_addition"] = _finalize_phase_usage(report["memory_addition"])
+    report["qa_retrieval"] = _finalize_phase_usage(report["qa_retrieval"])
+    report["total"] = {
+        "sessions": report["memory_addition"]["sessions"] + report["qa_retrieval"]["sessions"],
+        "assistant_messages": (
+            report["memory_addition"]["assistant_messages"] + report["qa_retrieval"]["assistant_messages"]
+        ),
+        "total_tokens": report["memory_addition"]["total_tokens"] + report["qa_retrieval"]["total_tokens"],
+        "input": report["memory_addition"]["input"] + report["qa_retrieval"]["input"],
+        "output": report["memory_addition"]["output"] + report["qa_retrieval"]["output"],
+        "cache_read": report["memory_addition"]["cache_read"] + report["qa_retrieval"]["cache_read"],
+        "cache_write": report["memory_addition"]["cache_write"] + report["qa_retrieval"]["cache_write"],
+        "cost_usd": round(report["memory_addition"]["cost_usd"] + report["qa_retrieval"]["cost_usd"], 6),
+    }
+    return report
+
+
+def _print_token_usage_summary(report):
+    print("\n=== OpenClaw Token Usage ===")
+    for phase, label in (
+        ("memory_addition", "Memory Addition"),
+        ("qa_retrieval", "QA Retrieval"),
+    ):
+        stats = report[phase]
+        print(f"\n{label}:")
+        print(f"  sessions: {stats['sessions']}")
+        print(f"  assistant model calls: {stats['assistant_messages']}")
+        print(f"  total_tokens: {stats['total_tokens']:,}")
+        print(f"  input: {stats['input']:,}")
+        print(f"  output: {stats['output']:,}")
+        print(f"  cache_read: {stats['cache_read']:,}")
+        print(f"  cache_write: {stats['cache_write']:,}")
+        print(f"  cost_usd: ${stats['cost_usd']:.4f}")
+        print(f"  avg_tokens_per_session: {stats['avg_tokens_per_session']:,.0f}")
+
+    total = report["total"]
+    print("\nTotal:")
+    print(f"  sessions: {total['sessions']}")
+    print(f"  assistant model calls: {total['assistant_messages']}")
+    print(f"  total_tokens: {total['total_tokens']:,}")
+    print(f"  cost_usd: ${total['cost_usd']:.4f}")
+
+    if report["excluded_sessions"] or report["memory_addition_other_sessions"]:
+        print(
+            f"\nExcluded sessions: {report['excluded_sessions']}, "
+            f"unclassified add-window sessions: {report['memory_addition_other_sessions']}"
+        )
+
+
+def save_openclaw_token_usage(report, results_dir):
+    output_path = os.path.join(results_dir, "openclaw_token_usage.json")
+    _save_json(output_path, report)
+    print(f"OpenClaw token usage saved to: {output_path}")
+    return output_path
 
 
 async def evaluate_client(
@@ -535,6 +830,11 @@ async def evaluate_client(
     all_grades = convert_numpy_types(all_grades)
     with open(judged_path, "w") as f:
         json.dump(all_grades, f, indent=2)
+
+    token_usage = collect_openclaw_token_usage(client_type, version, len(data), stage_timing_path)
+    if token_usage is not None:
+        save_openclaw_token_usage(token_usage, results_dir)
+        _print_token_usage_summary(token_usage)
 
     return all_grades
 
