@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Override with environment: LIB=memos-cloud VERSION=my-label ./run_locomo_openclaw_eval.sh
+# Override with environment: LIB=memos-local-plugin VERSION=my-label ./run_locomo_openclaw_eval.sh
 LIB="${LIB:-openclaw}"
 VERSION="${VERSION:-default}"
 
@@ -11,8 +11,8 @@ cd "$EVAL_ROOT"
 export PYTHONPATH="$EVAL_ROOT"
 
 echo "Running locomo_openclaw_eval.py..."
-python scripts/locomo/locomo_openclaw_eval.py --client_type "$LIB" --version "$VERSION"
+python3 scripts/locomo/locomo_openclaw_eval.py --client_type "$LIB" --version "$VERSION"
 
 echo "Running locomo_agent_metrics.py..."
-python scripts/locomo/locomo_agent_metrics.py --client_type "$LIB" --version "$VERSION"
+python3 scripts/locomo/locomo_agent_metrics.py --client_type "$LIB" --version "$VERSION"
 echo "All scripts completed successfully!"

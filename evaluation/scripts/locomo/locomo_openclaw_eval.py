@@ -22,6 +22,17 @@ from scripts.locomo.locomo_eval import (  # noqa: E402
     convert_numpy_types,
     locomo_grader,
 )
+from scripts.locomo.locomo_memos_local import (  # noqa: E402
+    configure_memos_local_plugin_openclaw,
+    is_memos_local_client,
+    locomo_add_session_key,
+    locomo_bpp_warmup_session_key,
+    locomo_qa_session_key,
+    prepare_user_db,
+    save_user_db_checkpoint,
+    settle_after_user_stage1,
+    warmup_memos_bpp_hook,
+)
 from scripts.utils.client import OpenclawClient  # noqa: E402
 
 
@@ -30,7 +41,8 @@ def update_plugin_and_restart(client_type, **kwargs):
         "mem0": "openclaw-mem0",
         "memos-cloud-cli": "memos-cloud-openclaw-plugin",
         "memos-cloud": "memos-cloud-openclaw-plugin",
-        "memos-local": "memos-local-openclaw-plugin",
+        "memos-local": "memos-local-plugin",
+        "memos-local-plugin": "memos-local-plugin",
         "mem9": "mem9",
         "openviking": "openviking",
         "supermemory": "openclaw-supermemory",
@@ -129,7 +141,7 @@ def process_conversation(conversation):
     return messages
 
 
-async def process_qa_pair(client, qa, user_id, loop):
+async def process_qa_pair(client, qa, user_id, loop, session_key=None):
     question = qa.get("question")
     golden_answer = qa.get("answer")
     category = qa.get("category")
@@ -140,7 +152,10 @@ async def process_qa_pair(client, qa, user_id, loop):
     search_start = time.time()
     try:
         search_result = await loop.run_in_executor(
-            None, lambda: client.search(question, user_id, top_k=5)
+            None,
+            lambda: client.search(
+                question, user_id, top_k=5, session_key=session_key
+            ),
         )
         search_duration = time.time() - search_start
 
@@ -239,6 +254,9 @@ async def evaluate_client(
 
     loop = asyncio.get_event_loop()
 
+    if is_memos_local_client(client_type):
+        configure_memos_local_plugin_openclaw()
+
     print("\n=== Stage 1: Memory Addition ===")
     update_model_apikey_and_base_url(
         model_apikey=os.getenv("MEMORY_ADDITION_API_KEY"),
@@ -257,6 +275,9 @@ async def evaluate_client(
     for user_idx, user_data in enumerate(data):
         user_id = f"locomo_exp_user_{user_idx}_{client_type}_{version}"
         client.set_agent_id(user_id)
+
+        if is_memos_local_client(client_type):
+            prepare_user_db(results_dir, user_idx)
 
         if str(client_type).lower() in ["memos-cloud-cli", "memos-cli"]:
             update_cli_user_id(user_id)
@@ -310,16 +331,46 @@ async def evaluate_client(
 
             try:
                 timestamp = batch_messages[0]["timestamp"] if batch_messages else time.time()
-                client.add(batch_messages, user_id, timestamp, len(batch_messages))
+                batch_session_key = (
+                    locomo_add_session_key(user_idx, version, batch_num)
+                    if is_memos_local_client(client_type)
+                    else None
+                )
+                client.add(
+                    batch_messages,
+                    user_id,
+                    timestamp,
+                    len(batch_messages),
+                    session_key=batch_session_key,
+                )
                 batch_duration = time.time() - batch_start_time
                 print(
                     f"  Added batch {batch_num} ({len(batch_messages)} messages) in {batch_duration:.2f}s"
                 )
+                if is_memos_local_client(client_type):
+                    checkpoint = save_user_db_checkpoint(results_dir, user_idx)
+                    print(f"  Saved memos-local DB checkpoint: {checkpoint}")
             except Exception as e:
                 print(f"  Error adding batch {batch_num} for user {user_id}: {e}")
                 continue
 
             _append_success_record(add_records_path, record_key)
+
+        if is_memos_local_client(client_type):
+            completed_after_user = _load_success_records(add_records_path)
+            user_stage1_complete = all(
+                f"{user_idx}_{i}" in completed_after_user for i in range(num_batches)
+            )
+            if user_stage1_complete:
+                print(f"Settling memos pipeline after Stage 1 for user {user_id}...")
+                settle = settle_after_user_stage1(user_idx)
+                if not settle.get("ok"):
+                    print(
+                        f"  Warning: memos pipeline settle timed out after "
+                        f"Stage 1 for user {user_idx}"
+                    )
+                checkpoint = save_user_db_checkpoint(results_dir, user_idx)
+                print(f"  Final memos-local DB checkpoint for user {user_idx}: {checkpoint}")
 
     add_end_time = time.time()
     _save_stage_timing(stage_timing_path, "memory_addition", add_start_time, add_end_time)
@@ -344,6 +395,15 @@ async def evaluate_client(
         user_id = f"locomo_exp_user_{user_idx}_{client_type}_{version}"
         client.set_agent_id(user_id)
 
+        if is_memos_local_client(client_type):
+            prepare_user_db(results_dir, user_idx)
+            warmup_memos_bpp_hook(
+                client,
+                user_id,
+                locomo_bpp_warmup_session_key(user_idx, version),
+                context=f"locomo QA user {user_idx}",
+            )
+
         if str(client_type).lower() in ["memos-cloud-cli", "memos-cli"]:
             update_cli_user_id(user_id)
         if str(client_type).lower() == "honcho":
@@ -366,9 +426,22 @@ async def evaluate_client(
 
         semaphore = asyncio.Semaphore(4)
 
-        async def process_with_semaphore(qa, semaphore=semaphore, user_id=user_id, loop=loop):
+        async def process_with_semaphore(
+            qa,
+            qa_idx,
+            semaphore=semaphore,
+            user_id=user_id,
+            loop=loop,
+        ):
             async with semaphore:
-                return await process_qa_pair(client, qa, user_id, loop)
+                qa_session_key = (
+                    locomo_qa_session_key(user_idx, version, qa_idx)
+                    if is_memos_local_client(client_type)
+                    else None
+                )
+                return await process_qa_pair(
+                    client, qa, user_id, loop, session_key=qa_session_key
+                )
 
         for qa_idx, qa in tqdm(
             enumerate(qa_pairs), total=len(qa_pairs), desc=f"Processing QA for user {user_id}"
@@ -379,7 +452,7 @@ async def evaluate_client(
                 print(f"  Skipping QA {qa_idx} for user {user_id} (already completed)")
                 continue
 
-            result = await process_with_semaphore(qa)
+            result = await process_with_semaphore(qa, qa_idx)
 
             if result is not None:
                 if user_id not in responses:
@@ -477,6 +550,7 @@ async def main():
             "memos-cli",
             "memos-cloud",
             "memos-local",
+            "memos-local-plugin",
             "openviking",
             "mem9",
             "mem0",
