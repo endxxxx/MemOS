@@ -104,6 +104,73 @@ def test_searcher_can_skip_rerank_per_request(mock_searcher):
     assert result[0].memory == "wm1"
 
 
+def test_searcher_limits_fact_retrieval_to_execution_plan(mock_searcher):
+    parsed_goal = MagicMock()
+    parsed_goal.memories = []
+    parsed_goal.rephrased_query = None
+    mock_searcher.task_goal_parser.parse.return_value = parsed_goal
+    mock_searcher.embedder.embed.return_value = [[0.1] * 5]
+
+    def retrieve_side_effect(*args, **kwargs):
+        memory_scope = kwargs.get("memory_scope", "")
+        return [make_item(memory_scope, 0.9)[0]]
+
+    mock_searcher.graph_retriever.retrieve.side_effect = retrieve_side_effect
+
+    result = mock_searcher.search(
+        query="test query",
+        top_k=3,
+        info={"test": True},
+        mode="fast",
+        memory_type="All",
+        search_working_memory=False,
+        search_longterm_memory=False,
+        search_user_memory=True,
+        rerank=False,
+    )
+
+    scopes = {
+        call.kwargs["memory_scope"]
+        for call in mock_searcher.graph_retriever.retrieve.call_args_list
+    }
+    assert scopes == {"UserMemory"}
+    assert [item.memory for item in result] == ["UserMemory"]
+
+
+def test_searcher_can_combine_working_and_preference_without_general_memory(mock_searcher):
+    parsed_goal = MagicMock()
+    parsed_goal.memories = []
+    parsed_goal.rephrased_query = None
+    mock_searcher.task_goal_parser.parse.return_value = parsed_goal
+    mock_searcher.embedder.embed.return_value = [[0.1] * 5]
+
+    def retrieve_side_effect(*args, **kwargs):
+        memory_scope = kwargs.get("memory_scope", "")
+        return [make_item(memory_scope, 0.9)[0]]
+
+    mock_searcher.graph_retriever.retrieve.side_effect = retrieve_side_effect
+
+    result = mock_searcher.search(
+        query="recommend for me",
+        top_k=3,
+        info={"test": True},
+        mode="fast",
+        memory_type="All",
+        search_working_memory=True,
+        search_longterm_memory=False,
+        search_user_memory=False,
+        include_preference_memory=True,
+        rerank=False,
+    )
+
+    scopes = {
+        call.kwargs["memory_scope"]
+        for call in mock_searcher.graph_retriever.retrieve.call_args_list
+    }
+    assert scopes == {"WorkingMemory", "PreferenceMemory"}
+    assert {item.memory for item in result} == {"WorkingMemory", "PreferenceMemory"}
+
+
 def test_searcher_fine_mode_triggers_reasoner(mock_searcher):
     parsed_goal = MagicMock()
     parsed_goal.memories = ["Cats"]

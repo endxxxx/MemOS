@@ -25,6 +25,12 @@ from memos.multi_mem_cube.single_cube import SingleCubeView
 from memos.multi_mem_cube.views import MemCubeView
 from memos.plugins.hook_defs import H
 from memos.plugins.hooks import hookable, trigger_hook
+from memos.search.memory_type_router import (
+    MemoryIntent,
+    MemoryRouteDecision,
+    MemoryRoutingScene,
+    route_memory_search,
+)
 
 
 logger = get_logger(__name__)
@@ -32,6 +38,7 @@ logger = get_logger(__name__)
 _ENV_CONTEXT_RECALL = "MEMOS_DREAM_CONTEXT_RECALL"
 _ENV_CONTEXT_RECALL_TOP_K = "MEMOS_DREAM_CONTEXT_RECALL_TOP_K"
 _DEFAULT_CONTEXT_RECALL_TOP_K = 2
+_ENV_MEMORY_TYPE_ROUTING = "MEMOS_MEMORY_TYPE_ROUTING_ENABLED"
 
 
 def _env_enabled(name: str, default: str = "off") -> bool:
@@ -81,14 +88,25 @@ class SearchHandler(BaseHandler):
 
         # Use deepcopy to avoid modifying the original request object
         search_req_local = copy.deepcopy(search_req)
+        route_decision = self._resolve_memory_route(search_req_local)
+        if route_decision is not None:
+            self._apply_memory_route(search_req_local, route_decision)
 
         # Expand top_k for deduplication (5x to ensure enough candidates)
         if search_req_local.dedup in ("sim", "mmr"):
             search_req_local.top_k = search_req_local.top_k * 3
 
         # Search and deduplicate
-        cube_view = self._build_cube_view(search_req_local)
-        results = cube_view.search_memories(search_req_local)
+        if route_decision is not None and self._can_skip_memory_search(
+            search_req_local, route_decision
+        ):
+            results = self._empty_search_results()
+        else:
+            cube_view = self._build_cube_view(search_req_local)
+            results = cube_view.search_memories(
+                search_req_local,
+                memory_search_plan=(route_decision.plan if route_decision is not None else None),
+            )
         hooked_results = trigger_hook(
             H.SEARCH_MEMORY_RESULTS,
             handler=self,
@@ -144,6 +162,61 @@ class SearchHandler(BaseHandler):
             message="Search completed successfully",
             data=results,
         )
+
+    def _resolve_memory_route(self, search_req: APISearchRequest) -> MemoryRouteDecision | None:
+        if not _env_enabled(_ENV_MEMORY_TYPE_ROUTING, "off"):
+            return None
+
+        decision = route_memory_search(
+            search_req.query,
+            MemoryRoutingScene(search_req.memory_routing_scene),
+        )
+        self.logger.info(
+            "[SearchHandler] Memory route: scene=%s intent=%s reason=%s matched_rules=%s plan=%s",
+            search_req.memory_routing_scene,
+            decision.intent.value,
+            decision.reason,
+            decision.matched_rules,
+            decision.plan,
+        )
+        return decision
+
+    @staticmethod
+    def _apply_memory_route(
+        search_req: APISearchRequest,
+        decision: MemoryRouteDecision,
+    ) -> None:
+        search_req.include_preference = (
+            search_req.include_preference and decision.plan.search_preference
+        )
+        if decision.intent in (MemoryIntent.SYSTEM, MemoryIntent.NONE):
+            search_req.include_skill_memory = False
+            search_req.search_tool_memory = False
+            search_req.internet_search = False
+
+    @staticmethod
+    def _can_skip_memory_search(
+        search_req: APISearchRequest,
+        decision: MemoryRouteDecision,
+    ) -> bool:
+        return (
+            not decision.plan.searches_any_memory
+            and not search_req.include_skill_memory
+            and not search_req.search_tool_memory
+            and not search_req.internet_search
+        )
+
+    @staticmethod
+    def _empty_search_results() -> dict[str, Any]:
+        return {
+            "text_mem": [],
+            "act_mem": [],
+            "para_mem": [],
+            "pref_mem": [],
+            "pref_note": "",
+            "tool_mem": [],
+            "skill_mem": [],
+        }
 
     def _merge_context_recall(
         self, *, results: dict[str, Any], search_req: APISearchRequest

@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from memos.mem_cube.navie import NaiveMemCube
     from memos.mem_reader.simple_struct import SimpleStructMemReader
     from memos.mem_scheduler.optimized_scheduler import OptimizedScheduler
+    from memos.search.memory_type_router import MemorySearchPlan
 
 
 @dataclass
@@ -86,7 +87,11 @@ class SingleCubeView(MemCubeView):
         return all_memories
 
     @timed
-    def search_memories(self, search_req: APISearchRequest) -> dict[str, Any]:
+    def search_memories(
+        self,
+        search_req: APISearchRequest,
+        memory_search_plan: MemorySearchPlan | None = None,
+    ) -> dict[str, Any]:
         """
         Unified memory search handling (text + preference memories).
         Preference memories are now searched through the same _search_text flow.
@@ -120,7 +125,12 @@ class SingleCubeView(MemCubeView):
         search_mode = self._get_search_mode(search_req.mode)
 
         # Unified search through _search_text (includes all memory types)
-        all_formatted_memories = self._search_text(search_req, user_context, search_mode)
+        all_formatted_memories = self._search_text(
+            search_req,
+            user_context,
+            search_mode,
+            memory_search_plan=memory_search_plan,
+        )
 
         # Build result with unified processing
         memories_result = post_process_textual_mem(
@@ -193,6 +203,7 @@ class SingleCubeView(MemCubeView):
         search_req: APISearchRequest,
         user_context: UserContext,
         search_mode: str,
+        memory_search_plan: MemorySearchPlan | None = None,
     ) -> list[dict[str, Any]]:
         """
         Search text memories based on mode.
@@ -207,11 +218,17 @@ class SingleCubeView(MemCubeView):
         """
         try:
             if search_mode == SearchMode.FAST:
-                text_memories = self._fast_search(search_req, user_context)
+                text_memories = self._fast_search(
+                    search_req, user_context, memory_search_plan=memory_search_plan
+                )
             elif search_mode == SearchMode.FINE:
-                text_memories = self._fine_search(search_req, user_context)
+                text_memories = self._fine_search(
+                    search_req, user_context, memory_search_plan=memory_search_plan
+                )
             elif search_mode == SearchMode.MIXTURE:
-                text_memories = self._mix_search(search_req, user_context)
+                text_memories = self._mix_search(
+                    search_req, user_context, memory_search_plan=memory_search_plan
+                )
             else:
                 self.logger.error(f"Unsupported search mode: {search_mode}")
                 return []
@@ -269,6 +286,7 @@ class SingleCubeView(MemCubeView):
         self,
         search_req: APISearchRequest,
         user_context: UserContext,
+        memory_search_plan: MemorySearchPlan | None = None,
     ) -> list:
         """
         Fine-grained search with query enhancement.
@@ -299,6 +317,17 @@ class SingleCubeView(MemCubeView):
         }
 
         # Fine retrieve
+        route_kwargs: dict[str, bool] = {}
+        if memory_search_plan is not None:
+            route_kwargs = {
+                "search_working_memory": memory_search_plan.search_working,
+                "search_longterm_memory": memory_search_plan.search_longterm,
+                "search_user_memory": memory_search_plan.search_user,
+                "include_preference_memory": (
+                    search_req.include_preference and memory_search_plan.search_preference
+                ),
+            }
+
         raw_retrieved_memories = self.searcher.retrieve(
             query=search_req.query,
             user_name=user_context.mem_cube_id,
@@ -310,6 +339,8 @@ class SingleCubeView(MemCubeView):
             search_filter=search_filter,
             search_priority=search_priority,
             info=info,
+            pref_mem_top_k=search_req.pref_top_k,
+            **route_kwargs,
         )
 
         # Post retrieve
@@ -318,6 +349,8 @@ class SingleCubeView(MemCubeView):
             top_k=search_req.top_k,
             user_name=user_context.mem_cube_id,
             info=info,
+            include_preference_memory=bool(route_kwargs.get("include_preference_memory", False)),
+            pref_mem_top_k=search_req.pref_top_k,
             dedup=search_req.dedup,
         )
 
@@ -387,6 +420,7 @@ class SingleCubeView(MemCubeView):
         self,
         search_req: APISearchRequest,
         user_context: UserContext,
+        memory_search_plan: MemorySearchPlan | None = None,
     ) -> list:
         """
         Fast search using vector database.
@@ -404,6 +438,7 @@ class SingleCubeView(MemCubeView):
             user_context=user_context,
             mode=SearchMode.FAST,
             include_embedding=(search_req.dedup in ("mmr", "sim")),
+            memory_search_plan=memory_search_plan,
         )
 
         return self._postformat_memories(
@@ -472,6 +507,7 @@ class SingleCubeView(MemCubeView):
         self,
         search_req: APISearchRequest,
         user_context: UserContext,
+        memory_search_plan: MemorySearchPlan | None = None,
     ) -> list:
         """
         Mix search combining fast and fine-grained approaches.
@@ -486,6 +522,7 @@ class SingleCubeView(MemCubeView):
         return self.mem_scheduler.mix_search_memories(
             search_req=search_req,
             user_context=user_context,
+            memory_search_plan=memory_search_plan,
         )
 
     def _get_sync_mode(self) -> str:

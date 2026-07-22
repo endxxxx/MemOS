@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from memos.api.product_models import APISearchRequest
+    from memos.search.memory_type_router import MemorySearchPlan
     from memos.types import SearchMode, UserContext
 
 
@@ -71,6 +72,7 @@ def search_text_memories(
     user_context: UserContext,
     mode: SearchMode,
     include_embedding: bool | None = None,
+    memory_search_plan: MemorySearchPlan | None = None,
 ) -> list[Any]:
     """
     Shared text-memory search logic for API and scheduler paths.
@@ -93,6 +95,15 @@ def search_text_memories(
         skill_mem_top_k=search_req.skill_mem_top_k,
         include_preference_memory=search_req.include_preference,
         pref_mem_top_k=search_req.pref_top_k,
+        search_working_memory=(
+            memory_search_plan.search_working if memory_search_plan is not None else True
+        ),
+        search_longterm_memory=(
+            memory_search_plan.search_longterm if memory_search_plan is not None else True
+        ),
+        search_user_memory=(
+            memory_search_plan.search_user if memory_search_plan is not None else True
+        ),
         dedup=search_req.dedup,
         rerank=search_req.rerank,
         include_embedding=include_embedding,

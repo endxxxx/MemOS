@@ -20,6 +20,7 @@ from memos.mem_scheduler.utils.db_utils import get_utc_now
 from memos.mem_scheduler.utils.misc_utils import group_messages_by_user_and_mem_cube
 from memos.memories.textual.tree import TextualMemoryItem, TreeTextMemory
 from memos.search import build_search_context, search_text_memories
+from memos.search.memory_type_router import MemorySearchPlan
 from memos.types import (
     MemCubeID,
     SearchMode,
@@ -104,6 +105,7 @@ class OptimizedScheduler(GeneralScheduler):
         user_context: UserContext,
         mem_cube: NaiveMemCube,
         mode: SearchMode,
+        memory_search_plan: MemorySearchPlan | None = None,
     ):
         """Shared text-memory search via centralized search service."""
         return search_text_memories(
@@ -112,12 +114,14 @@ class OptimizedScheduler(GeneralScheduler):
             user_context=user_context,
             mode=mode,
             include_embedding=(search_req.dedup == "mmr"),
+            memory_search_plan=memory_search_plan,
         )
 
     def mix_search_memories(
         self,
         search_req: APISearchRequest,
         user_context: UserContext,
+        memory_search_plan: MemorySearchPlan | None = None,
     ) -> list[dict[str, Any]]:
         """
         Mix search memories: fast search + async fine search
@@ -136,6 +140,7 @@ class OptimizedScheduler(GeneralScheduler):
                 user_context=user_context,
                 mem_cube=self.mem_cube,
                 mode=SearchMode.FAST,
+                memory_search_plan=memory_search_plan,
             )
             return [
                 format_textual_memory_item(item, include_embedding=search_req.dedup == "sim")
@@ -151,6 +156,17 @@ class OptimizedScheduler(GeneralScheduler):
 
         info = search_ctx.info
 
+        route_kwargs: dict[str, bool] = {}
+        if memory_search_plan is not None:
+            route_kwargs = {
+                "search_working_memory": memory_search_plan.search_working,
+                "search_longterm_memory": memory_search_plan.search_longterm,
+                "search_user_memory": memory_search_plan.search_user,
+                "include_preference_memory": (
+                    search_req.include_preference and memory_search_plan.search_preference
+                ),
+            }
+
         raw_retrieved_memories = self.searcher.retrieve(
             query=search_req.query,
             user_name=user_context.mem_cube_id,
@@ -163,6 +179,8 @@ class OptimizedScheduler(GeneralScheduler):
             info=info,
             search_tool_memory=search_req.search_tool_memory,
             tool_mem_top_k=search_req.tool_mem_top_k,
+            pref_mem_top_k=search_req.pref_top_k,
+            **route_kwargs,
         )
 
         # Try to get pre-computed memories if available
@@ -171,6 +189,12 @@ class OptimizedScheduler(GeneralScheduler):
             mem_cube_id=user_context.mem_cube_id,
             turns=self.history_memory_turns,
         )
+        if memory_search_plan is not None:
+            history_memories = [
+                memory
+                for memory in history_memories
+                if self._memory_allowed_by_plan(memory, memory_search_plan)
+            ]
         logger.info(f"Found {len(history_memories)} history memories.")
 
         # if history memories can directly answer
@@ -188,6 +212,8 @@ class OptimizedScheduler(GeneralScheduler):
             info=info,
             search_tool_memory=search_req.search_tool_memory,
             tool_mem_top_k=search_req.tool_mem_top_k,
+            include_preference_memory=bool(route_kwargs.get("include_preference_memory", False)),
+            pref_mem_top_k=search_req.pref_top_k,
             dedup=search_req.dedup,
         )
         memories = merged_memories[: search_req.top_k]
@@ -205,6 +231,19 @@ class OptimizedScheduler(GeneralScheduler):
             },
         )
         return formatted_memories
+
+    @staticmethod
+    def _memory_allowed_by_plan(memory: Any, plan: MemorySearchPlan) -> bool:
+        memory_type = getattr(getattr(memory, "metadata", None), "memory_type", None)
+        if memory_type == "WorkingMemory":
+            return plan.search_working
+        if memory_type in ("LongTermMemory", "RawFileMemory", "OuterMemory"):
+            return plan.search_longterm
+        if memory_type == "UserMemory":
+            return plan.search_user
+        if memory_type == "PreferenceMemory":
+            return plan.search_preference
+        return True
 
     def update_search_memories_to_redis(
         self,

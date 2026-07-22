@@ -388,6 +388,14 @@ class APISearchRequest(BaseRequest):
         description="Search mode: fast, fine, or mixture.",
     )
 
+    memory_routing_scene: Literal["normal", "minimal"] = Field(
+        "normal",
+        description=(
+            "Memory intent routing scene. 'normal' favors recall quality; "
+            "'minimal' favors latency and skips memory search for unmatched queries."
+        ),
+    )
+
     session_id: str | None = Field(
         None,
         description=(

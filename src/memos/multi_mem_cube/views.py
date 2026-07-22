@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:
     from memos.api.product_models import APIADDRequest, APIFeedbackRequest, APISearchRequest
+    from memos.search.memory_type_router import MemorySearchPlan
 
 
 class MemCubeView(Protocol):
@@ -27,7 +28,11 @@ class MemCubeView(Protocol):
         """
         ...
 
-    def search_memories(self, search_req: APISearchRequest) -> dict[str, Any]:
+    def search_memories(
+        self,
+        search_req: APISearchRequest,
+        memory_search_plan: MemorySearchPlan | None = None,
+    ) -> dict[str, Any]:
         """
         Process search_req, read memories from one or more cubes and search them.
 

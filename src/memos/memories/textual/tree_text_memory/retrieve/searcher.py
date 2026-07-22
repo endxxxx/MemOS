@@ -118,6 +118,9 @@ class Searcher:
         skill_mem_top_k: int = 3,
         include_preference_memory: bool = False,
         pref_mem_top_k: int = 6,
+        search_working_memory: bool = True,
+        search_longterm_memory: bool = True,
+        search_user_memory: bool = True,
         **kwargs,
     ) -> list[tuple[TextualMemoryItem, float]]:
         logger.info(
@@ -134,23 +137,26 @@ class Searcher:
             **kwargs,
         )
         results = self._retrieve_paths(
-            query,
-            parsed_goal,
-            query_embedding,
-            info,
-            top_k,
-            mode,
-            memory_type,
-            search_filter,
-            search_priority,
-            user_name,
-            search_tool_memory,
-            tool_mem_top_k,
-            include_skill_memory,
-            skill_mem_top_k,
-            include_preference_memory,
-            pref_mem_top_k,
-            rerank,
+            query=query,
+            parsed_goal=parsed_goal,
+            query_embedding=query_embedding,
+            info=info,
+            top_k=top_k,
+            mode=mode,
+            memory_type=memory_type,
+            search_filter=search_filter,
+            search_priority=search_priority,
+            user_name=user_name,
+            search_tool_memory=search_tool_memory,
+            tool_mem_top_k=tool_mem_top_k,
+            include_skill_memory=include_skill_memory,
+            skill_mem_top_k=skill_mem_top_k,
+            include_preference_memory=include_preference_memory,
+            pref_mem_top_k=pref_mem_top_k,
+            search_working_memory=search_working_memory,
+            search_longterm_memory=search_longterm_memory,
+            search_user_memory=search_user_memory,
+            rerank=rerank,
         )
         return results
 
@@ -204,6 +210,9 @@ class Searcher:
         skill_mem_top_k: int = 3,
         include_preference_memory: bool = False,
         pref_mem_top_k: int = 6,
+        search_working_memory: bool = True,
+        search_longterm_memory: bool = True,
+        search_user_memory: bool = True,
         dedup: str | None = None,
         **kwargs,
     ) -> list[TextualMemoryItem]:
@@ -255,6 +264,9 @@ class Searcher:
                 skill_mem_top_k=skill_mem_top_k,
                 include_preference_memory=include_preference_memory,
                 pref_mem_top_k=pref_mem_top_k,
+                search_working_memory=search_working_memory,
+                search_longterm_memory=search_longterm_memory,
+                search_user_memory=search_user_memory,
                 **kwargs,
             )
 
@@ -376,6 +388,9 @@ class Searcher:
         skill_mem_top_k: int = 3,
         include_preference_memory: bool = False,
         pref_mem_top_k: int = 6,
+        search_working_memory: bool = True,
+        search_longterm_memory: bool = True,
+        search_user_memory: bool = True,
         rerank: bool = True,
     ):
         """Run A/B/C/D/E/F retrieval paths in parallel"""
@@ -387,37 +402,41 @@ class Searcher:
         id_filter = {k: v for k, v in id_filter.items() if v is not None}
 
         with ContextThreadPoolExecutor(max_workers=5) as executor:
-            tasks.append(
-                executor.submit(
-                    self._retrieve_from_working_memory,
-                    query,
-                    parsed_goal,
-                    query_embedding,
-                    top_k,
-                    memory_type,
-                    search_filter,
-                    search_priority,
-                    user_name,
-                    id_filter,
-                    rerank=rerank,
+            if search_working_memory:
+                tasks.append(
+                    executor.submit(
+                        self._retrieve_from_working_memory,
+                        query,
+                        parsed_goal,
+                        query_embedding,
+                        top_k,
+                        memory_type,
+                        search_filter,
+                        search_priority,
+                        user_name,
+                        id_filter,
+                        rerank=rerank,
+                    )
                 )
-            )
-            tasks.append(
-                executor.submit(
-                    self._retrieve_from_long_term_and_user,
-                    query,
-                    parsed_goal,
-                    query_embedding,
-                    top_k,
-                    memory_type,
-                    search_filter,
-                    search_priority,
-                    user_name,
-                    id_filter,
-                    mode=mode,
-                    rerank=rerank,
+            if search_longterm_memory or search_user_memory:
+                tasks.append(
+                    executor.submit(
+                        self._retrieve_from_long_term_and_user,
+                        query,
+                        parsed_goal,
+                        query_embedding,
+                        top_k,
+                        memory_type,
+                        search_filter,
+                        search_priority,
+                        user_name,
+                        id_filter,
+                        mode=mode,
+                        rerank=rerank,
+                        search_longterm_memory=search_longterm_memory,
+                        search_user_memory=search_user_memory,
+                    )
                 )
-            )
             tasks.append(
                 executor.submit(
                     self._retrieve_from_internet,
@@ -432,7 +451,12 @@ class Searcher:
                     rerank=rerank,
                 )
             )
-            if self.use_fulltext:
+            if (
+                search_working_memory
+                and search_longterm_memory
+                and search_user_memory
+                and self.use_fulltext
+            ):
                 tasks.append(
                     executor.submit(
                         self._retrieve_from_keyword,
@@ -749,6 +773,8 @@ class Searcher:
         id_filter: dict | None = None,
         mode: str = "fast",
         rerank: bool = True,
+        search_longterm_memory: bool = True,
+        search_user_memory: bool = True,
     ):
         """Retrieve and rerank from LongTermMemory and UserMemory"""
         results = []
@@ -765,7 +791,11 @@ class Searcher:
             cot_embeddings = query_embedding
 
         with ContextThreadPoolExecutor(max_workers=3) as executor:
-            if memory_type in ["All", "AllSummaryMemory", "LongTermMemory"]:
+            if search_longterm_memory and memory_type in [
+                "All",
+                "AllSummaryMemory",
+                "LongTermMemory",
+            ]:
                 tasks.append(
                     executor.submit(
                         self.graph_retriever.retrieve,
@@ -781,7 +811,7 @@ class Searcher:
                         use_fast_graph=self.use_fast_graph,
                     )
                 )
-            if memory_type in ["All", "AllSummaryMemory", "UserMemory"]:
+            if search_user_memory and memory_type in ["All", "AllSummaryMemory", "UserMemory"]:
                 tasks.append(
                     executor.submit(
                         self.graph_retriever.retrieve,

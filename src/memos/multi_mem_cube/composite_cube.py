@@ -12,6 +12,7 @@ from memos.utils import timed_stage
 if TYPE_CHECKING:
     from memos.api.product_models import APIADDRequest, APIFeedbackRequest, APISearchRequest
     from memos.multi_mem_cube.single_cube import SingleCubeView
+    from memos.search.memory_type_router import MemorySearchPlan
 
 
 @dataclass
@@ -43,7 +44,11 @@ class CompositeCubeView(MemCubeView):
 
         return all_results
 
-    def search_memories(self, search_req: APISearchRequest) -> dict[str, Any]:
+    def search_memories(
+        self,
+        search_req: APISearchRequest,
+        memory_search_plan: MemorySearchPlan | None = None,
+    ) -> dict[str, Any]:
         # aggregated MOSSearchResult
         merged_results: dict[str, Any] = {
             "text_mem": [],
@@ -57,7 +62,7 @@ class CompositeCubeView(MemCubeView):
 
         def _search_single_cube(view: SingleCubeView) -> dict[str, Any]:
             self.logger.info(f"[CompositeCubeView] fan-out search to cube={view.cube_id}")
-            return view.search_memories(search_req)
+            return view.search_memories(search_req, memory_search_plan=memory_search_plan)
 
         # parallel search for each cube
         with ContextThreadPoolExecutor(max_workers=2) as executor:
